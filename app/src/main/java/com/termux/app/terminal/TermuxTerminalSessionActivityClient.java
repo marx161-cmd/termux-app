@@ -34,6 +34,7 @@ import com.termux.terminal.TextStyle;
 
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.util.Properties;
 
@@ -49,6 +50,20 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
     private int mBellSoundId;
 
     private static final String LOG_TAG = "TermuxTerminalSessionActivityClient";
+    private static final String BUNDLED_DEFAULT_FONT_ASSET_PATH = "fonts/SpaceMono-Regular.ttf";
+    private static final String BUNDLED_FONT_MODES_DIR_NAME = "font-modes";
+    private static final String BUNDLED_FONT_MODES_MARKER_NAME = ".bundled-font-modes-seeded";
+    private static final String[][] BUNDLED_FONT_MODE_ASSETS = {
+        {"iosevka-term.ttf", "fonts/IosevkaTerm-Regular.ttf"},
+        {"hack.ttf", "fonts/Hack-Regular.ttf"},
+        {"jetbrains-mono.ttf", "fonts/JetBrainsMono-Regular.ttf"},
+        {"monaspace-xenon.ttf", "fonts/MonaspaceXenon-Regular.ttf"},
+        {"ubuntu-mono.ttf", "fonts/UbuntuMono-Regular.ttf"},
+        {"atomic-age.ttf", "fonts/AtomicAge-Regular.ttf"},
+        {"aliens-cows.ttf", "fonts/AliensCows-Regular.ttf"}
+    };
+
+    private Typeface mBundledDefaultTypeface;
 
     public TermuxTerminalSessionActivityClient(TermuxActivity activity) {
         this.mActivity = activity;
@@ -510,10 +525,79 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
             }
             updateBackgroundColor();
 
-            final Typeface newTypeface = (fontFile.exists() && fontFile.length() > 0) ? Typeface.createFromFile(fontFile) : Typeface.MONOSPACE;
+            seedBundledFontModesIfNeeded(fontFile);
+            final Typeface newTypeface = getTerminalTypeface(fontFile);
             mActivity.getTerminalView().setTypeface(newTypeface);
         } catch (Exception e) {
             Logger.logStackTraceWithMessage(LOG_TAG, "Error in checkForFontAndColors()", e);
+        }
+    }
+
+    private Typeface getTerminalTypeface(File fontFile) {
+        try {
+            if (fontFile.exists() && fontFile.length() > 0) {
+                return Typeface.createFromFile(fontFile);
+            }
+        } catch (RuntimeException e) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "Failed loading user terminal font", e);
+        }
+
+        try {
+            if (mBundledDefaultTypeface == null) {
+                mBundledDefaultTypeface = Typeface.createFromAsset(mActivity.getAssets(), BUNDLED_DEFAULT_FONT_ASSET_PATH);
+            }
+            return mBundledDefaultTypeface;
+        } catch (RuntimeException e) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "Failed loading bundled default terminal font", e);
+            return Typeface.MONOSPACE;
+        }
+    }
+
+    private void seedBundledFontModesIfNeeded(File fontFile) {
+        File termuxDataHomeDir = fontFile.getParentFile();
+        if (termuxDataHomeDir == null) {
+            return;
+        }
+
+        File fontModesDir = new File(termuxDataHomeDir, BUNDLED_FONT_MODES_DIR_NAME);
+        File markerFile = new File(fontModesDir, BUNDLED_FONT_MODES_MARKER_NAME);
+        if (markerFile.exists()) {
+            return;
+        }
+
+        if (!fontModesDir.exists() && !fontModesDir.mkdirs()) {
+            return;
+        }
+
+        try {
+            for (String[] asset : BUNDLED_FONT_MODE_ASSETS) {
+                copyAssetIfMissing(asset[1], new File(fontModesDir, asset[0]));
+            }
+            if (!markerFile.exists()) {
+                markerFile.createNewFile();
+            }
+        } catch (Exception e) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "Failed seeding bundled font modes", e);
+        }
+    }
+
+    private void copyAssetIfMissing(String assetPath, File destination) throws Exception {
+        if (destination.exists() && destination.length() > 0) {
+            return;
+        }
+
+        File parent = destination.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            return;
+        }
+
+        try (InputStream in = mActivity.getAssets().open(assetPath);
+             FileOutputStream out = new FileOutputStream(destination)) {
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
+            }
         }
     }
 

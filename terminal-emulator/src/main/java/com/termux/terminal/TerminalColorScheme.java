@@ -61,6 +61,17 @@ public final class TerminalColorScheme {
 
     public final int[] mDefaultColors = new int[TextStyle.NUM_INDEXED_COLORS];
 
+    /**
+     * Fork addition (scope.md 2026-10-29): `remap=teal-red` in colors.properties forces every
+     * colour into two families: greys -> the teal base at the same lightness, saturated colours ->
+     * the red base, with the original hue spread over a narrow band so colours stay distinct.
+     * Applies to palette entries the file does not set, to runtime palette changes (OSC 4) and to
+     * truecolor at draw time. Optional `remap.teal` / `remap.red` override the two bases.
+     */
+    private volatile boolean mRemapEnabled = false;
+    private int mRemapTeal = 0xff66ffe8;
+    private int mRemapRed = 0xffff0062;
+
     public TerminalColorScheme() {
         reset();
     }
@@ -71,13 +82,28 @@ public final class TerminalColorScheme {
 
     public void updateWith(Properties props) {
         reset();
+        mRemapEnabled = false;
+        mRemapTeal = 0xff66ffe8;
+        mRemapRed = 0xffff0062;
         boolean cursorPropExists = false;
+        boolean[] explicitlySet = new boolean[TextStyle.NUM_INDEXED_COLORS];
         for (Map.Entry<Object, Object> entries : props.entrySet()) {
             String key = (String) entries.getKey();
             String value = (String) entries.getValue();
             int colorIndex;
 
-            if (key.equals("foreground")) {
+            if (key.equals("remap")) {
+                if (value.trim().equals("teal-red")) mRemapEnabled = true;
+                else if (!value.trim().equals("off"))
+                    throw new IllegalArgumentException("Property 'remap' has invalid value: '" + value + "'");
+                continue;
+            } else if (key.equals("remap.teal") || key.equals("remap.red")) {
+                int base = TerminalColors.parse(value);
+                if (base == 0)
+                    throw new IllegalArgumentException("Property '" + key + "' has invalid color: '" + value + "'");
+                if (key.equals("remap.teal")) mRemapTeal = base; else mRemapRed = base;
+                continue;
+            } else if (key.equals("foreground")) {
                 colorIndex = TextStyle.COLOR_INDEX_FOREGROUND;
             } else if (key.equals("background")) {
                 colorIndex = TextStyle.COLOR_INDEX_BACKGROUND;
@@ -99,10 +125,82 @@ public final class TerminalColorScheme {
                 throw new IllegalArgumentException("Property '" + key + "' has invalid color: '" + value + "'");
 
             mDefaultColors[colorIndex] = colorValue;
+            explicitlySet[colorIndex] = true;
+        }
+
+        if (mRemapEnabled) {
+            for (int i = 0; i < TextStyle.NUM_INDEXED_COLORS; i++) {
+                if (!explicitlySet[i]) mDefaultColors[i] = remapColor(mDefaultColors[i]);
+            }
         }
 
         if (!cursorPropExists)
             setCursorColorForBackground();
+    }
+
+    public boolean isRemapEnabled() {
+        return mRemapEnabled;
+    }
+
+    /** Map `argb` into the teal/red families if remapping is enabled, otherwise return it unchanged. */
+    public int remapIfEnabled(int argb) {
+        return mRemapEnabled ? remapColor(argb) : argb;
+    }
+
+    /** See {@link #mRemapEnabled}. Pure integer/float math so it also runs in JVM unit tests. */
+    public int remapColor(int argb) {
+        float[] hsl = toHsl(argb);
+        float lightness = hsl[2];
+        if (lightness <= 0.02f) return argb; // keep black black
+        if (hsl[1] < 0.22f || lightness > 0.97f) {
+            // Greys and whites: teal hue/saturation, lightness compressed into 0.10-0.86 so even
+            // bright white stays visibly teal and the grey steps stay in order and distinct.
+            float[] teal = toHsl(mRemapTeal);
+            return fromHsl(teal[0], teal[1] * Math.min(1f, 0.35f + hsl[1] * 3f), 0.10f + 0.76f * lightness, argb >>> 24);
+        }
+        // Saturated colours: red family. Spread the original hue over +/-24 degrees around the red
+        // base so e.g. ANSI green and blue still differ, and keep the original lightness.
+        float[] red = toHsl(mRemapRed);
+        float hue = red[0] + (hsl[0] / 360f - 0.5f) * 48f;
+        if (hue < 0) hue += 360f;
+        if (hue >= 360f) hue -= 360f;
+        float saturation = Math.max(0.55f, Math.min(1f, hsl[1])) * red[1];
+        return fromHsl(hue, saturation, lightness, argb >>> 24);
+    }
+
+    private static float[] toHsl(int argb) {
+        float r = ((argb >> 16) & 0xff) / 255f, g = ((argb >> 8) & 0xff) / 255f, b = (argb & 0xff) / 255f;
+        float max = Math.max(r, Math.max(g, b)), min = Math.min(r, Math.min(g, b));
+        float l = (max + min) / 2f, h = 0f, s = 0f;
+        float d = max - min;
+        if (d > 1e-6f) {
+            s = l > 0.5f ? d / (2f - max - min) : d / (max + min);
+            if (max == r) h = ((g - b) / d) % 6f;
+            else if (max == g) h = (b - r) / d + 2f;
+            else h = (r - g) / d + 4f;
+            h *= 60f;
+            if (h < 0) h += 360f;
+        }
+        return new float[]{h, s, l};
+    }
+
+    private static int fromHsl(float h, float s, float l, int alpha) {
+        float c = (1f - Math.abs(2f * l - 1f)) * s;
+        float x = c * (1f - Math.abs((h / 60f) % 2f - 1f));
+        float m = l - c / 2f;
+        float r, g, b;
+        if (h < 60) { r = c; g = x; b = 0; }
+        else if (h < 120) { r = x; g = c; b = 0; }
+        else if (h < 180) { r = 0; g = c; b = x; }
+        else if (h < 240) { r = 0; g = x; b = c; }
+        else if (h < 300) { r = x; g = 0; b = c; }
+        else { r = c; g = 0; b = x; }
+        int ri = Math.round((r + m) * 255f), gi = Math.round((g + m) * 255f), bi = Math.round((b + m) * 255f);
+        return ((alpha & 0xff) << 24) | (clamp255(ri) << 16) | (clamp255(gi) << 8) | clamp255(bi);
+    }
+
+    private static int clamp255(int v) {
+        return Math.max(0, Math.min(255, v));
     }
 
     /**

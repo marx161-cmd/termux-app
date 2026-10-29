@@ -10,6 +10,7 @@ import android.graphics.Typeface;
 import android.os.Build;
 
 import com.termux.terminal.TerminalBuffer;
+import com.termux.terminal.TerminalColors;
 import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalRow;
 import com.termux.terminal.TextStyle;
@@ -195,10 +196,15 @@ public final class TerminalRenderer {
             // Let bold have bright colors if applicable (one of the first 8):
             if (bold && foreColor >= 0 && foreColor < 8) foreColor += 8;
             foreColor = palette[foreColor];
+        } else {
+            // Truecolor bypasses the palette; force it into the teal/red families too (scope.md 2026-10-29).
+            foreColor = TerminalColors.COLOR_SCHEME.remapIfEnabled(foreColor);
         }
 
         if ((backColor & 0xff000000) != 0xff000000) {
             backColor = palette[backColor];
+        } else {
+            backColor = TerminalColors.COLOR_SCHEME.remapIfEnabled(backColor);
         }
 
         // Reverse video here if _one and only one_ of the reverse flags are set:

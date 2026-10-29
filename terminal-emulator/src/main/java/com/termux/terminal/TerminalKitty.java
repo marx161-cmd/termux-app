@@ -3,6 +3,13 @@ package com.termux.terminal;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffXfermode;
+import android.graphics.Rect;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Base64;
 
 import java.io.ByteArrayOutputStream;
@@ -18,54 +25,113 @@ import java.util.Map;
 import java.util.zip.Inflater;
 
 /**
- * Kitty terminal graphics protocol, v1 subset. See `scope.md` in the repo root for what is in
- * and out of scope.
+ * Kitty terminal graphics protocol. See `scope.md` in the repo root for the decisions.
  * - https://sw.kovidgoyal.net/kitty/graphics-protocol/
  *
  * Commands arrive as `APC G <control data> ; <payload> ST` and are passed here from
- * {@link TerminalEmulator} with the leading `G` already stripped. Decoded images are stamped into
- * the screen through {@link TerminalBuffer#addTerminalBitmapForKitty}, so scrolling, garbage
- * collection and drawing are shared with the sixel and iTerm image support.
+ * {@link TerminalEmulator} with the leading `G` already stripped.
  *
- * Supported: actions `t`, `T`, `p`, `q`, `d`; formats 24, 32, 100 (PNG); compression `o=z`;
- * chunked transfer `m=1`; media `t=d`, `t=f`, `t=t`; keys `i`, `I`, `p`, `x`, `y`, `w`, `h`,
- * `X`, `Y`, `c`, `r`, `C`, `q`, `s`, `v`, `S`, `O`.
- * Not yet: animation frames, negative z-index (behind text), shared memory `t=s`, Unicode
- * placeholders `U=1`.
+ * Three kinds of placement:
+ * - CELLS (default): stamped into the screen cells through
+ *   {@link TerminalBuffer#addTerminalBitmapForKitty}, sharing scrolling/GC/drawing with sixel and iTerm.
+ * - UNDER (`z<0`): drawn under the text. Anchored to the {@link TerminalRow} the cursor was on
+ *   ({@link TerminalRow#mKittyAnchor}), so it scrolls with that row and dies when the row is reused.
+ * - VIRTUAL (`U=1`): Unicode placeholders. Nothing is drawn until text contains U+10EEEE cells whose
+ *   diacritics give row/column and whose foreground colour gives the image id (works through tmux).
+ *
+ * Supported: actions `t T p q d f a c`; formats 24, 32, 100 (PNG); `o=z`; chunked `m=1`; media
+ * `t=d f t s` (`s` = Termux's shm_open files in `$PREFIX/tmp`); keys `i I p x y w h X Y c r C q s v S O
+ * z U`; animation frames (`a=f`), control (`a=a` s/c/r/z/v) and composition (`a=c`).
  */
 public class TerminalKitty {
 
     private static final String LOG_TAG = "TerminalKitty";
 
+    /** Unicode placeholder character for `U=1` placements. */
+    public static final int PLACEHOLDER = 0x10EEEE;
+
+    /** Where Termux's shm_open() keeps POSIX shared memory segments (verified 2026-10-29). */
+    private static final String SHM_DIR = "/data/data/com.termux/files/usr/tmp";
+
     /** Total decoded bytes kept for stored images before the oldest ones are evicted. */
-    private static final long STORAGE_QUOTA_BYTES = 128L * 1024 * 1024;
+    private static final long STORAGE_QUOTA_BYTES = 192L * 1024 * 1024;
 
     private static final int FORMAT_RGB = 24;
     private static final int FORMAT_RGBA = 32;
     private static final int FORMAT_PNG = 100;
 
+    private static final int DEFAULT_GAP_MS = 40;
+    private static final int ANIM_STOPPED = 1, ANIM_LOADING = 2, ANIM_RUNNING = 3;
+
     private final TerminalEmulator mEmulator;
+    private final Handler mHandler = new Handler(Looper.getMainLooper());
+    private final Runnable mAnimationTick = this::animationTick;
+    private boolean mAnimationScheduled;
+    private boolean mReleased;
+
+    /** A stored image: its root frame plus any animation frames. */
+    private static final class Image {
+        final List<Bitmap> frames = new ArrayList<>();
+        /** Per-frame gap in ms; negative = gapless (skipped). */
+        final List<Integer> gaps = new ArrayList<>();
+        int current;
+        int state = ANIM_STOPPED;
+        /** Plays left, 0 = forever. */
+        int loops;
+        long nextAt;
+
+        Image(Bitmap root) {
+            frames.add(root);
+            gaps.add(DEFAULT_GAP_MS);
+        }
+
+        Bitmap currentFrame() {
+            return frames.get(Math.min(current, frames.size() - 1));
+        }
+
+        long bytes() {
+            long total = 0;
+            for (Bitmap frame : frames) total += frame.getByteCount();
+            return total;
+        }
+    }
 
     /** Stored images by image id, in insertion order for eviction. */
-    private final LinkedHashMap<Integer, Bitmap> mImages = new LinkedHashMap<>();
+    private final LinkedHashMap<Integer, Image> mImages = new LinkedHashMap<>();
     private long mImagesBytes;
     /** Image number (`I=`) to the newest image id that was assigned for it. */
     private final HashMap<Integer, Integer> mImageNumbers = new HashMap<>();
     private int mNextAutoImageId = 0x7f000000;
 
-    /** A displayed placement of a stored image (or of an unstored one, with image id 0). */
-    private static class Placement {
+    private static final int KIND_CELLS = 0, KIND_UNDER = 1, KIND_VIRTUAL = 2;
+
+    /** How a placement turns an image frame into what is drawn. */
+    private static final class Params {
+        int srcX, srcY, srcW, srcH, columns, rows, offsetX, offsetY;
+    }
+
+    private static final class Placement {
+        final int kind;
         final int imageId;
         final int placementId;
-        final TerminalBitmap terminalBitmap;
+        final Params params;
+        TerminalBitmap terminalBitmap; // CELLS
+        long anchor;                   // UNDER
+        int column;                    // UNDER
+        int cellRows;                  // UNDER: rows covered
+        Bitmap rendered;               // UNDER, VIRTUAL
+        int renderedCellW, renderedCellH, renderedFrame = -1; // VIRTUAL cache key
 
-        Placement(int imageId, int placementId, TerminalBitmap terminalBitmap) {
+        Placement(int kind, int imageId, int placementId, Params params) {
+            this.kind = kind;
             this.imageId = imageId;
             this.placementId = placementId;
-            this.terminalBitmap = terminalBitmap;
+            this.params = params;
         }
     }
     private final List<Placement> mPlacements = new ArrayList<>();
+    private final HashMap<Long, Placement> mUnderlays = new HashMap<>();
+    private long mNextAnchor = 1;
 
     /** Control keys of the first chunk of a chunked (`m=1`) transmission in progress. */
     private Map<Character, String> mChunkedControl;
@@ -73,6 +139,12 @@ public class TerminalKitty {
 
     public TerminalKitty(TerminalEmulator emulator) {
         mEmulator = emulator;
+    }
+
+    /** Stop the animation timer (the emulator was reset). */
+    void release() {
+        mReleased = true;
+        mHandler.removeCallbacks(mAnimationTick);
     }
 
     /** Thrown for protocol errors, reported to the client as `CODE:message`. */
@@ -108,8 +180,8 @@ public class TerminalKitty {
         try {
             if (getInt(control, 'm', 0) == 1) {
                 char action = getChar(control, 'a', 't');
-                if (action != 't' && action != 'T' && action != 'q') {
-                    throw new KittyException("EINVAL", "chunking is only supported for transmit and query");
+                if (action != 't' && action != 'T' && action != 'q' && action != 'f') {
+                    throw new KittyException("EINVAL", "chunking is only supported for transmit, query and frames");
                 }
                 mChunkedControl = control;
                 mChunkedData = new ByteArrayOutputStream();
@@ -162,21 +234,34 @@ public class TerminalKitty {
                     return;
                 }
                 int imageId = assignImageId(control);
-                if (imageId != 0) storeImage(imageId, bitmap);
-                if (action == 'T') place(control, imageId, bitmap);
+                Image image = new Image(bitmap);
+                if (imageId != 0) storeImage(imageId, image);
+                if (action == 'T') place(control, imageId, image);
                 respond(control, "OK");
                 return;
             }
             case 'p': {
                 int imageId = resolveImageId(control);
-                Bitmap bitmap = mImages.get(imageId);
-                if (bitmap == null) throw new KittyException("ENOENT", "no image with id " + imageId);
-                place(control, imageId, bitmap);
+                Image image = mImages.get(imageId);
+                if (image == null) throw new KittyException("ENOENT", "no image with id " + imageId);
+                place(control, imageId, image);
                 respond(control, "OK");
                 return;
             }
             case 'd':
                 delete(control);
+                return;
+            case 'f':
+                frame(control, payload);
+                respond(control, "OK");
+                return;
+            case 'a':
+                animate(control);
+                respond(control, "OK");
+                return;
+            case 'c':
+                compose(control);
+                respond(control, "OK");
                 return;
             default:
                 throw new KittyException("EINVAL", "unsupported action " + action);
@@ -196,11 +281,19 @@ public class TerminalKitty {
                 break;
             case 'f':
             case 't':
-                data = readFile(new String(payload, java.nio.charset.StandardCharsets.UTF_8), medium == 't',
+                data = readFile(new String(payload, java.nio.charset.StandardCharsets.UTF_8), medium == 't' ? 1 : 0,
                     getInt(control, 'O', 0), getInt(control, 'S', 0));
                 break;
-            case 's':
-                throw new KittyException("EINVAL", "shared memory transfer not supported");
+            case 's': {
+                // Termux's shm_open() backs `/name` with the file $PREFIX/tmp/name.
+                String name = new String(payload, java.nio.charset.StandardCharsets.UTF_8).trim();
+                while (name.startsWith("/")) name = name.substring(1);
+                if (name.isEmpty() || name.contains("/") || name.equals("..") || name.equals(".")) {
+                    throw new KittyException("EINVAL", "bad shared memory name");
+                }
+                data = readFile(SHM_DIR + "/" + name, 2, getInt(control, 'O', 0), getInt(control, 'S', 0));
+                break;
+            }
             default:
                 throw new KittyException("EINVAL", "unknown transmission medium " + medium);
         }
@@ -244,7 +337,8 @@ public class TerminalKitty {
         }
     }
 
-    private static byte[] readFile(String path, boolean isTemp, int offset, int size) throws KittyException {
+    /** @param deleteMode 0 = keep (t=f), 1 = temp file checks + delete (t=t), 2 = delete (t=s). */
+    private static byte[] readFile(String path, int deleteMode, int offset, int size) throws KittyException {
         File file = new File(path);
         String canonical;
         try {
@@ -255,7 +349,7 @@ public class TerminalKitty {
         if (canonical.startsWith("/proc/") || canonical.startsWith("/sys/") || canonical.startsWith("/dev/")) {
             throw new KittyException("EBADF", "refusing to read device files");
         }
-        if (isTemp && !(canonical.contains("tty-graphics-protocol") && canonical.contains("/tmp/"))) {
+        if (deleteMode == 1 && !(canonical.contains("tty-graphics-protocol") && canonical.contains("/tmp/"))) {
             throw new KittyException("EBADF", "temporary file not in a temp dir or missing tty-graphics-protocol in name");
         }
         try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
@@ -270,9 +364,9 @@ public class TerminalKitty {
         } catch (KittyException e) {
             throw e;
         } catch (Exception e) {
-            throw new KittyException("EBADF", "failed to read file");
+            throw new KittyException(deleteMode == 2 ? "ENOENT" : "EBADF", "failed to read " + (deleteMode == 2 ? "shared memory" : "file"));
         } finally {
-            if (isTemp) //noinspection ResultOfMethodCallIgnored
+            if (deleteMode != 0) //noinspection ResultOfMethodCallIgnored
                 file.delete();
         }
     }
@@ -329,24 +423,34 @@ public class TerminalKitty {
         return resolved;
     }
 
-    private void storeImage(int imageId, Bitmap bitmap) {
-        Bitmap old = mImages.remove(imageId);
-        if (old != null) mImagesBytes -= old.getByteCount();
-        mImages.put(imageId, bitmap);
-        mImagesBytes += bitmap.getByteCount();
+    private Image requireImage(Map<Character, String> control) throws KittyException {
+        int imageId = resolveImageId(control);
+        Image image = mImages.get(imageId);
+        if (image == null) throw new KittyException("ENOENT", "no image with id " + imageId);
+        return image;
+    }
 
-        Iterator<Map.Entry<Integer, Bitmap>> it = mImages.entrySet().iterator();
+    private void storeImage(int imageId, Image image) {
+        Image old = mImages.remove(imageId);
+        if (old != null) mImagesBytes -= old.bytes();
+        mImages.put(imageId, image);
+        mImagesBytes += image.bytes();
+        evict(imageId);
+    }
+
+    private void evict(int keepImageId) {
+        Iterator<Map.Entry<Integer, Image>> it = mImages.entrySet().iterator();
         while (mImagesBytes > STORAGE_QUOTA_BYTES && it.hasNext()) {
-            Map.Entry<Integer, Bitmap> entry = it.next();
-            if (entry.getKey() == imageId) continue;
-            mImagesBytes -= entry.getValue().getByteCount();
+            Map.Entry<Integer, Image> entry = it.next();
+            if (entry.getKey() == keepImageId) continue;
+            mImagesBytes -= entry.getValue().bytes();
             it.remove();
         }
     }
 
     private void freeImage(int imageId) {
-        Bitmap old = mImages.remove(imageId);
-        if (old != null) mImagesBytes -= old.getByteCount();
+        Image old = mImages.remove(imageId);
+        if (old != null) mImagesBytes -= old.bytes();
         Iterator<Integer> it = mImageNumbers.values().iterator();
         while (it.hasNext()) {
             if (it.next() == imageId) it.remove();
@@ -357,70 +461,151 @@ public class TerminalKitty {
 
     /* ---------- placement ---------- */
 
-    private void place(Map<Character, String> control, int imageId, Bitmap image) throws KittyException {
-        TerminalBuffer screen = mEmulator.getScreen();
-        int cellWidth = Math.max(1, mEmulator.getCellWidthPixels());
-        int cellHeight = Math.max(1, mEmulator.getCellHeightPixels());
+    private Params readParams(Map<Character, String> control) throws KittyException {
+        Params params = new Params();
+        params.srcX = getInt(control, 'x', 0);
+        params.srcY = getInt(control, 'y', 0);
+        params.srcW = getInt(control, 'w', 0);
+        params.srcH = getInt(control, 'h', 0);
+        params.columns = getInt(control, 'c', 0);
+        params.rows = getInt(control, 'r', 0);
+        params.offsetX = getInt(control, 'X', 0);
+        params.offsetY = getInt(control, 'Y', 0);
+        return params;
+    }
 
-        // Source rectangle.
-        int srcX = getInt(control, 'x', 0), srcY = getInt(control, 'y', 0);
-        int srcW = getInt(control, 'w', 0), srcH = getInt(control, 'h', 0);
-        srcX = clamp(srcX, 0, image.getWidth() - 1);
-        srcY = clamp(srcY, 0, image.getHeight() - 1);
-        if (srcW <= 0 || srcX + srcW > image.getWidth()) srcW = image.getWidth() - srcX;
-        if (srcH <= 0 || srcY + srcH > image.getHeight()) srcH = image.getHeight() - srcY;
-        Bitmap bitmap = (srcX == 0 && srcY == 0 && srcW == image.getWidth() && srcH == image.getHeight()) ?
+    private static Bitmap crop(Bitmap image, Params p) {
+        int srcX = clamp(p.srcX, 0, image.getWidth() - 1);
+        int srcY = clamp(p.srcY, 0, image.getHeight() - 1);
+        int srcW = p.srcW <= 0 || srcX + p.srcW > image.getWidth() ? image.getWidth() - srcX : p.srcW;
+        int srcH = p.srcH <= 0 || srcY + p.srcH > image.getHeight() ? image.getHeight() - srcY : p.srcH;
+        return (srcX == 0 && srcY == 0 && srcW == image.getWidth() && srcH == image.getHeight()) ?
             image : Bitmap.createBitmap(image, srcX, srcY, srcW, srcH);
+    }
 
-        // Scale to the requested number of columns / rows, keeping aspect ratio if only one is given.
-        int columns = getInt(control, 'c', 0), rows = getInt(control, 'r', 0);
+    /** Crop, scale to `c`/`r` cells and offset by `X`/`Y` pixels: what CELLS and UNDER placements draw. */
+    private static Bitmap transform(Bitmap image, Params p, int cellWidth, int cellHeight) throws KittyException {
+        Bitmap bitmap = crop(image, p);
         int targetW = bitmap.getWidth(), targetH = bitmap.getHeight();
-        if (columns > 0 && rows > 0) {
-            targetW = columns * cellWidth;
-            targetH = rows * cellHeight;
-        } else if (columns > 0) {
-            targetW = columns * cellWidth;
+        if (p.columns > 0 && p.rows > 0) {
+            targetW = p.columns * cellWidth;
+            targetH = p.rows * cellHeight;
+        } else if (p.columns > 0) {
+            targetW = p.columns * cellWidth;
             targetH = Math.max(1, Math.round((float) bitmap.getHeight() * targetW / bitmap.getWidth()));
-        } else if (rows > 0) {
-            targetH = rows * cellHeight;
+        } else if (p.rows > 0) {
+            targetH = p.rows * cellHeight;
             targetW = Math.max(1, Math.round((float) bitmap.getWidth() * targetH / bitmap.getHeight()));
         }
         checkSize(targetW, targetH);
         if (targetW != bitmap.getWidth() || targetH != bitmap.getHeight()) {
             bitmap = Bitmap.createScaledBitmap(bitmap, targetW, targetH, true);
         }
-
-        // Pixel offset inside the first cell.
-        int offsetX = clamp(getInt(control, 'X', 0), 0, cellWidth - 1);
-        int offsetY = clamp(getInt(control, 'Y', 0), 0, cellHeight - 1);
+        int offsetX = clamp(p.offsetX, 0, cellWidth - 1);
+        int offsetY = clamp(p.offsetY, 0, cellHeight - 1);
         if (offsetX > 0 || offsetY > 0) {
             Bitmap padded = Bitmap.createBitmap(bitmap.getWidth() + offsetX, bitmap.getHeight() + offsetY, Bitmap.Config.ARGB_8888);
             new Canvas(padded).drawBitmap(bitmap, offsetX, offsetY, null);
             bitmap = padded;
         }
+        return bitmap;
+    }
+
+    private void place(Map<Character, String> control, int imageId, Image image) throws KittyException {
+        int cellWidth = Math.max(1, mEmulator.getCellWidthPixels());
+        int cellHeight = Math.max(1, mEmulator.getCellHeightPixels());
+        Params params = readParams(control);
+        int placementId = getInt(control, 'p', 0);
 
         // A placement with the same image and placement id replaces the old one.
-        int placementId = getInt(control, 'p', 0);
         if (imageId != 0 && placementId != 0) {
             removePlacements(p -> p.imageId == imageId && p.placementId == placementId);
         }
 
+        if (getInt(control, 'U', 0) == 1) {
+            // Virtual placement for Unicode placeholders: size the cell grid, draw nothing yet.
+            if (imageId == 0) throw new KittyException("EINVAL", "virtual placements need an image id");
+            Bitmap cropped = crop(image.currentFrame(), params);
+            if (params.columns <= 0 && params.rows <= 0) {
+                params.columns = Math.max(1, (cropped.getWidth() + cellWidth - 1) / cellWidth);
+                params.rows = Math.max(1, (cropped.getHeight() + cellHeight - 1) / cellHeight);
+            } else if (params.columns <= 0) {
+                params.columns = Math.max(1, Math.round((float) params.rows * cellHeight * cropped.getWidth() / cropped.getHeight() / cellWidth));
+            } else if (params.rows <= 0) {
+                params.rows = Math.max(1, Math.round((float) params.columns * cellWidth * cropped.getHeight() / cropped.getWidth() / cellHeight));
+            }
+            mPlacements.add(new Placement(KIND_VIRTUAL, imageId, placementId, params));
+            return;
+        }
+
+        Bitmap bitmap = transform(image.currentFrame(), params, cellWidth, cellHeight);
         int x = mEmulator.getCursorCol();
         int y = mEmulator.getCursorRow();
         int cellsWide = Math.min(mEmulator.mColumns - x, (bitmap.getWidth() + cellWidth - 1) / cellWidth);
         int cellsHigh = (bitmap.getHeight() + cellHeight - 1) / cellHeight;
+        boolean moveCursor = getInt(control, 'C', 0) != 1;
+
+        if (getInt(control, 'z', 0) < 0) {
+            // Under the text: anchor to the cursor's row so it scrolls with it.
+            pruneUnderlays();
+            TerminalBuffer screen = mEmulator.getScreen();
+            TerminalRow row = screen.allocateFullLineIfNecessary(screen.externalToInternalRow(y));
+            Placement placement = new Placement(KIND_UNDER, imageId, placementId, params);
+            placement.anchor = mNextAnchor++;
+            placement.column = x;
+            placement.cellRows = cellsHigh;
+            placement.rendered = bitmap;
+            row.mKittyAnchor = placement.anchor;
+            mUnderlays.put(placement.anchor, placement);
+            mPlacements.add(placement);
+            if (moveCursor) {
+                // Like the cell placements: end on the image's last row, after its last column.
+                for (int i = 1; i < cellsHigh; i++) mEmulator.linefeedForKitty();
+                mEmulator.setCursorPositionForKitty(mEmulator.getCursorRow(), clamp(x + cellsWide, 0, mEmulator.mColumns - 1));
+            }
+            return;
+        }
+
         // `TerminalBitmap.buildOrThrow()` scrolls the screen when the image runs past the bottom.
         int scrolled = Math.max(0, y + cellsHigh - mEmulator.mRows);
-
-        TerminalBitmap terminalBitmap = screen.addTerminalBitmapForKitty(bitmap, x, y, cellWidth, cellHeight);
+        TerminalBitmap terminalBitmap = mEmulator.getScreen().addTerminalBitmapForKitty(bitmap, x, y, cellWidth, cellHeight);
         if (terminalBitmap == null) throw new KittyException("ENOMEM", "failed to place image");
-        mPlacements.add(new Placement(imageId, placementId, terminalBitmap));
+        Placement placement = new Placement(KIND_CELLS, imageId, placementId, params);
+        placement.terminalBitmap = terminalBitmap;
+        mPlacements.add(placement);
 
         // By default the cursor moves to the cell after the last column on the last row of the image.
-        if (getInt(control, 'C', 0) != 1) {
+        if (moveCursor) {
             int row = clamp(y + cellsHigh - 1 - scrolled, 0, mEmulator.mRows - 1);
             int col = clamp(x + cellsWide, 0, mEmulator.mColumns - 1);
             mEmulator.setCursorPositionForKitty(row, col);
+        }
+    }
+
+    /** Forget underlays whose anchor row was cleared, reused or scrolled out of the transcript. */
+    private void pruneUnderlays() {
+        if (mUnderlays.isEmpty()) return;
+        java.util.HashSet<Long> alive = new java.util.HashSet<>();
+        for (TerminalBuffer buffer : mEmulator.buffersForKitty()) {
+            for (TerminalRow row : buffer.mLines) {
+                if (row != null && row.mKittyAnchor != 0) alive.add(row.mKittyAnchor);
+            }
+        }
+        Iterator<Map.Entry<Long, Placement>> it = mUnderlays.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<Long, Placement> entry = it.next();
+            if (!alive.contains(entry.getKey())) {
+                mPlacements.remove(entry.getValue());
+                it.remove();
+            }
+        }
+    }
+
+    private boolean isAlive(Placement placement) {
+        switch (placement.kind) {
+            case KIND_CELLS: return mEmulator.getScreen().isTerminalBitmapAlive(placement.terminalBitmap);
+            case KIND_UNDER: return mUnderlays.containsKey(placement.anchor);
+            default: return true;
         }
     }
 
@@ -436,19 +621,262 @@ public class TerminalKitty {
         Iterator<Placement> it = mPlacements.iterator();
         while (it.hasNext()) {
             Placement placement = it.next();
-            if (!screen.isTerminalBitmapAlive(placement.terminalBitmap)) {
+            if (!isAlive(placement)) {
                 // Scrolled out, garbage collected or the screen was cleared.
                 it.remove();
                 continue;
             }
             if (filter.matches(placement)) {
-                toRemove.add(placement.terminalBitmap);
+                if (placement.kind == KIND_CELLS) toRemove.add(placement.terminalBitmap);
+                if (placement.kind == KIND_UNDER) mUnderlays.remove(placement.anchor);
                 imageIds.add(placement.imageId);
                 it.remove();
             }
         }
         if (!toRemove.isEmpty()) screen.removeTerminalBitmaps(toRemove);
         return imageIds;
+    }
+
+
+
+    /* ---------- drawing hooks for the renderer ---------- */
+
+    /** The bitmap drawn under the text for the row anchored with `anchor`, or null. */
+    public Bitmap underlayBitmap(long anchor) {
+        Placement placement = mUnderlays.get(anchor);
+        return placement == null ? null : placement.rendered;
+    }
+
+    public int underlayColumn(long anchor) {
+        Placement placement = mUnderlays.get(anchor);
+        return placement == null ? 0 : placement.column;
+    }
+
+    /** The most rows any underlay covers, so the renderer can look a little above the visible area. */
+    public int maxUnderlayRows() {
+        int max = 0;
+        for (Placement placement : mUnderlays.values()) max = Math.max(max, placement.cellRows);
+        return max;
+    }
+
+    public boolean hasUnderlays() {
+        return !mUnderlays.isEmpty();
+    }
+
+    /** The number a placeholder diacritic encodes, or -1. */
+    public static int diacriticValue(int codePoint) {
+        return TerminalKittyDiacritics.valueOf(codePoint);
+    }
+
+    /**
+     * For a placeholder cell of `imageId` at image `row`/`col`, return the bitmap and fill `outSrc`
+     * with the slice to draw into the cell, or return null if there is no such virtual placement.
+     */
+    public Bitmap placeholderSlice(int imageId, int placementId, int row, int col, int cellW, int cellH, Rect outSrc) {
+        Placement placement = null;
+        for (int i = mPlacements.size() - 1; i >= 0; i--) {
+            Placement p = mPlacements.get(i);
+            if (p.kind == KIND_VIRTUAL && p.imageId == imageId && (placementId == 0 || p.placementId == placementId)) {
+                placement = p;
+                break;
+            }
+        }
+        Image image = mImages.get(imageId);
+        if (placement == null || image == null) return null;
+        Params params = placement.params;
+        if (row < 0 || col < 0 || row >= params.rows || col >= params.columns) return null;
+
+        if (placement.rendered == null || placement.renderedCellW != cellW || placement.renderedCellH != cellH
+            || placement.renderedFrame != image.current) {
+            // Fit the image into the c x r cell grid, keeping its aspect ratio, centred (as kitty does).
+            Bitmap cropped = crop(image.currentFrame(), params);
+            int gridW = params.columns * cellW, gridH = params.rows * cellH;
+            try {
+                checkSize(gridW, gridH);
+            } catch (KittyException e) {
+                return null;
+            }
+            float scale = Math.min((float) gridW / cropped.getWidth(), (float) gridH / cropped.getHeight());
+            int w = Math.max(1, Math.round(cropped.getWidth() * scale)), h = Math.max(1, Math.round(cropped.getHeight() * scale));
+            Bitmap grid = Bitmap.createBitmap(gridW, gridH, Bitmap.Config.ARGB_8888);
+            new Canvas(grid).drawBitmap(Bitmap.createScaledBitmap(cropped, w, h, true), (gridW - w) / 2f, (gridH - h) / 2f, null);
+            placement.rendered = grid;
+            placement.renderedCellW = cellW;
+            placement.renderedCellH = cellH;
+            placement.renderedFrame = image.current;
+        }
+        outSrc.set(col * cellW, row * cellH, (col + 1) * cellW, (row + 1) * cellH);
+        return placement.rendered;
+    }
+
+
+
+    /* ---------- animation ---------- */
+
+    /** `a=f`: add a frame, or edit one (`r`), from transmitted data. */
+    private void frame(Map<Character, String> control, byte[] payload) throws KittyException {
+        Image image = requireImage(control);
+        Bitmap data = loadImage(control, payload);
+        Bitmap root = image.frames.get(0);
+        int editFrame = getInt(control, 'r', 0);
+        int baseFrame = getInt(control, 'c', 0);
+
+        Bitmap canvasBitmap;
+        if (editFrame > 0) {
+            if (editFrame > image.frames.size()) throw new KittyException("ENOENT", "no frame " + editFrame);
+            canvasBitmap = image.frames.get(editFrame - 1).copy(Bitmap.Config.ARGB_8888, true);
+        } else if (baseFrame > 0) {
+            if (baseFrame > image.frames.size()) throw new KittyException("ENOENT", "no frame " + baseFrame);
+            canvasBitmap = image.frames.get(baseFrame - 1).copy(Bitmap.Config.ARGB_8888, true);
+        } else {
+            canvasBitmap = Bitmap.createBitmap(root.getWidth(), root.getHeight(), Bitmap.Config.ARGB_8888);
+            int rgba = getInt(control, 'Y', 0);
+            if (rgba != 0) canvasBitmap.eraseColor((rgba >>> 8) | (rgba << 24)); // RGBA -> ARGB
+        }
+
+        Paint paint = new Paint();
+        if (getInt(control, 'X', 0) == 1) paint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC));
+        new Canvas(canvasBitmap).drawBitmap(data, getInt(control, 'x', 0), getInt(control, 'y', 0), paint);
+
+        int gap = getInt(control, 'z', 0);
+        mImagesBytes -= image.bytes();
+        if (editFrame > 0) {
+            image.frames.set(editFrame - 1, canvasBitmap);
+            if (control.containsKey('z')) image.gaps.set(editFrame - 1, gap == 0 ? DEFAULT_GAP_MS : gap);
+        } else {
+            image.frames.add(canvasBitmap);
+            image.gaps.add(gap == 0 ? DEFAULT_GAP_MS : gap);
+        }
+        mImagesBytes += image.bytes();
+        evict(resolveImageId(control));
+
+        if (editFrame - 1 == image.current) refreshPlacements(resolveImageId(control), image);
+        scheduleAnimation();
+    }
+
+    /** `a=a`: animation control. */
+    private void animate(Map<Character, String> control) throws KittyException {
+        int imageId = resolveImageId(control);
+        Image image = requireImage(control);
+        int gapFrame = getInt(control, 'r', 0);
+        if (gapFrame > 0 && gapFrame <= image.frames.size() && control.containsKey('z')) {
+            int gap = getInt(control, 'z', 0);
+            image.gaps.set(gapFrame - 1, gap == 0 ? DEFAULT_GAP_MS : gap);
+        }
+        int loops = getInt(control, 'v', 0);
+        if (loops == 1) image.loops = 0;          // forever
+        else if (loops > 1) image.loops = loops - 1;
+        int currentFrame = getInt(control, 'c', 0);
+        if (currentFrame > 0 && currentFrame <= image.frames.size()) {
+            image.current = currentFrame - 1;
+            refreshPlacements(imageId, image);
+        }
+        int state = getInt(control, 's', 0);
+        if (state >= ANIM_STOPPED && state <= ANIM_RUNNING) {
+            if (image.state == ANIM_STOPPED && state != ANIM_STOPPED) {
+                image.nextAt = SystemClock.uptimeMillis() + Math.max(1, image.gaps.get(image.current));
+            }
+            image.state = state;
+        }
+        scheduleAnimation();
+    }
+
+    /** `a=c`: copy a rectangle from frame `r` onto frame `c`. */
+    private void compose(Map<Character, String> control) throws KittyException {
+        int imageId = resolveImageId(control);
+        Image image = requireImage(control);
+        int src = getInt(control, 'r', 1), dst = getInt(control, 'c', 1);
+        if (src < 1 || src > image.frames.size() || dst < 1 || dst > image.frames.size()) {
+            throw new KittyException("ENOENT", "no such frame");
+        }
+        Bitmap source = image.frames.get(src - 1);
+        int x = getInt(control, 'x', 0), y = getInt(control, 'y', 0);
+        int w = getInt(control, 'w', 0), h = getInt(control, 'h', 0);
+        if (w <= 0) w = source.getWidth() - x;
+        if (h <= 0) h = source.getHeight() - y;
+        Bitmap dest = image.frames.get(dst - 1).copy(Bitmap.Config.ARGB_8888, true);
+        Paint paint = new Paint();
+        if (getInt(control, 'C', 0) == 1) paint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC));
+        int dx = getInt(control, 'X', 0), dy = getInt(control, 'Y', 0);
+        new Canvas(dest).drawBitmap(source, new Rect(x, y, x + w, y + h), new Rect(dx, dy, dx + w, dy + h), paint);
+        image.frames.set(dst - 1, dest);
+        if (dst - 1 == image.current) refreshPlacements(imageId, image);
+    }
+
+    private void scheduleAnimation() {
+        if (mReleased) return;
+        long next = Long.MAX_VALUE;
+        for (Image image : mImages.values()) {
+            if (image.state != ANIM_STOPPED && image.frames.size() > 1) next = Math.min(next, image.nextAt);
+        }
+        mHandler.removeCallbacks(mAnimationTick);
+        mAnimationScheduled = next != Long.MAX_VALUE;
+        if (mAnimationScheduled) {
+            mHandler.postDelayed(mAnimationTick, Math.max(1, next - SystemClock.uptimeMillis()));
+        }
+    }
+
+    private void animationTick() {
+        if (mReleased) return;
+        long now = SystemClock.uptimeMillis();
+        boolean changed = false;
+        for (Map.Entry<Integer, Image> entry : mImages.entrySet()) {
+            Image image = entry.getValue();
+            if (image.state == ANIM_STOPPED || image.frames.size() < 2 || now < image.nextAt) continue;
+            int last = image.frames.size() - 1;
+            int next = image.current;
+            for (int guard = 0; guard <= last; guard++) {
+                if (next == last) {
+                    if (image.state == ANIM_LOADING) break;        // wait for more frames
+                    if (image.loops > 0 && --image.loops == 0) {   // that was the last play
+                        image.state = ANIM_STOPPED;
+                        break;
+                    }
+                    next = 0;
+                } else {
+                    next++;
+                }
+                if (image.gaps.get(next) >= 0) break;              // negative gap = gapless, skip
+            }
+            if (next != image.current) {
+                image.current = next;
+                refreshPlacements(entry.getKey(), image);
+                changed = true;
+            }
+            image.nextAt = now + Math.max(1, image.gaps.get(image.current));
+        }
+        if (changed) mEmulator.requestRedrawForKitty();
+        scheduleAnimation();
+    }
+
+    /** Re-render every placement of `image` from its current frame. */
+    private void refreshPlacements(int imageId, Image image) {
+        int cellWidth = Math.max(1, mEmulator.getCellWidthPixels());
+        int cellHeight = Math.max(1, mEmulator.getCellHeightPixels());
+        for (Placement placement : mPlacements) {
+            if (placement.imageId != imageId || !isAlive(placement)) continue;
+            try {
+                switch (placement.kind) {
+                    case KIND_CELLS: {
+                        Bitmap old = placement.terminalBitmap.getBitmap();
+                        Bitmap next = transform(image.currentFrame(), placement.params, cellWidth, cellHeight);
+                        if (old != null && (next.getWidth() > old.getWidth() || next.getHeight() > old.getHeight())) {
+                            next = Bitmap.createBitmap(next, 0, 0, Math.min(next.getWidth(), old.getWidth()),
+                                Math.min(next.getHeight(), old.getHeight()));
+                        }
+                        placement.terminalBitmap.replaceBitmapForKitty(next);
+                        break;
+                    }
+                    case KIND_UNDER:
+                        placement.rendered = transform(image.currentFrame(), placement.params, cellWidth, cellHeight);
+                        break;
+                    case KIND_VIRTUAL:
+                        placement.renderedFrame = -1; // re-rendered lazily by placeholderSlice()
+                        break;
+                }
+            } catch (KittyException ignored) {
+            }
+        }
     }
 
 
@@ -504,10 +932,17 @@ public class TerminalKitty {
                 }
                 break;
             }
+            case 'z': {
+                // Placements with the given z-index: only the "under the text" layer is tracked by z.
+                int z = getInt(control, 'z', 0);
+                if (z < 0) removePlacements(p -> p.kind == KIND_UNDER);
+                break;
+            }
             default:
-                // Other delete targets are not supported yet, ignore silently like an unknown escape.
+                // Other delete targets are not supported, ignore silently like an unknown escape.
                 break;
         }
+        mEmulator.requestRedrawForKitty();
     }
 
     private boolean hasPlacements(int imageId) {
@@ -611,7 +1046,7 @@ public class TerminalKitty {
 
     @Override
     public String toString() {
-        return String.format(Locale.US, "TerminalKitty{images=%d, bytes=%d, placements=%d}",
-            mImages.size(), mImagesBytes, mPlacements.size());
+        return String.format(Locale.US, "TerminalKitty{images=%d, bytes=%d, placements=%d, underlays=%d}",
+            mImages.size(), mImagesBytes, mPlacements.size(), mUnderlays.size());
     }
 }

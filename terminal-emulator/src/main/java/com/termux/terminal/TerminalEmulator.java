@@ -2655,6 +2655,26 @@ public final class TerminalEmulator {
         return mClient;
     }
 
+    /** Kitty `z<0` placements move the cursor like a linefeed (scrolling if needed). */
+    void linefeedForKitty() {
+        doLinefeed();
+    }
+
+    /** Kitty animation frames changed: redraw. */
+    void requestRedrawForKitty() {
+        if (mSession instanceof TerminalSession) ((TerminalSession) mSession).notifyScreenUpdate();
+    }
+
+    /** Both screens, so kitty underlays anchored on the inactive one survive a screen switch. */
+    TerminalBuffer[] buffersForKitty() {
+        return new TerminalBuffer[]{mMainBuffer, mAltBuffer};
+    }
+
+    /** Kitty graphics state, for the renderer (underlays and Unicode placeholders). */
+    public TerminalKitty getKitty() {
+        return mKitty;
+    }
+
 
 
 
@@ -3542,6 +3562,7 @@ public final class TerminalEmulator {
         clearTerminalControlArgs();
         clearOscTypeVariables();
         mITermImage = null;
+        if (mKitty != null) mKitty.release();
         mKitty = new TerminalKitty(this);
     }
 

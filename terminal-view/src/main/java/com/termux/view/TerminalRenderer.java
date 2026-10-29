@@ -10,6 +10,7 @@ import android.graphics.Typeface;
 import android.os.Build;
 
 import com.termux.terminal.TerminalBuffer;
+import com.termux.terminal.TerminalKitty;
 import com.termux.terminal.TerminalColors;
 import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalRow;
@@ -22,6 +23,10 @@ import com.termux.terminal.WcWidth;
  * Saves font metrics, so needs to be recreated each time the typeface or font size changes.
  */
 public final class TerminalRenderer {
+
+    /** Fork addition: reused rects for kitty Unicode-placeholder slices. */
+    private final Rect mPlaceholderSrc = new Rect();
+    private final RectF mPlaceholderDst = new RectF();
 
     final int mTextSize;
     final Typeface mTypeface;
@@ -74,9 +79,26 @@ public final class TerminalRenderer {
         if (reverseVideo)
             canvas.drawColor(palette[TextStyle.COLOR_INDEX_FOREGROUND], PorterDuff.Mode.SRC);
 
+        // Fork addition: kitty `z<0` images under the text. Anchored rows may sit a little above
+        // the visible area while the image still reaches into it.
+        final TerminalKitty kitty = mEmulator.getKitty();
+        if (kitty != null && kitty.hasUnderlays()) {
+            int firstRow = Math.max(topRow - kitty.maxUnderlayRows(), -screen.getActiveTranscriptRows());
+            for (int row = firstRow; row < endRow; row++) {
+                TerminalRow anchored = screen.allocateFullLineIfNecessary(screen.externalToInternalRow(row));
+                if (anchored.mKittyAnchor == 0) continue;
+                Bitmap underlay = kitty.underlayBitmap(anchored.mKittyAnchor);
+                if (underlay == null) continue;
+                canvas.drawBitmap(underlay, kitty.underlayColumn(anchored.mKittyAnchor) * mFontWidth,
+                    mFontLineSpacingAndAscent + (row - topRow) * mFontLineSpacing, null);
+            }
+        }
+
         float heightOffset = mFontLineSpacingAndAscent;
         for (int row = topRow; row < endRow; row++) {
             heightOffset += mFontLineSpacing;
+            // Kitty Unicode placeholders: the left neighbour supplies missing row/column/id-MSB.
+            int placeholderPrevId = -1, placeholderPrevRow = 0, placeholderPrevCol = 0, placeholderPrevMsb = 0;
 
             final int cursorX = (row == cursorRow && cursorVisible) ? cursorCol : -1;
             int selx1 = -1, selx2 = -1;
@@ -104,7 +126,71 @@ public final class TerminalRenderer {
                 final int charsForCodePoint = charIsHighsurrogate ? 2 : 1;
                 final int codePoint = charIsHighsurrogate ? Character.toCodePoint(charAtIndex, line[currentCharIndex + 1]) : charAtIndex;
                 final long style = lineObject.getStyle(column);
+                if (codePoint == TerminalKitty.PLACEHOLDER && kitty != null) {
+                    // Flush the text run in front of the placeholder first.
+                    if (lastRunStartColumn >= 0 && column > lastRunStartColumn) {
+                        int cursorColor = lastRunInsideCursor ? mEmulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_CURSOR] : 0;
+                        boolean invertCursorTextColor = lastRunInsideCursor && cursorShape == TerminalEmulator.TERMINAL_CURSOR_STYLE_BLOCK;
+                        drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, column - lastRunStartColumn,
+                            lastRunStartIndex, currentCharIndex - lastRunStartIndex, measuredWidthForRun,
+                            cursorColor, cursorShape, lastRunStyle, reverseVideo || invertCursorTextColor || lastRunInsideSelection);
+                    }
+                    // Diacritics after U+10EEEE: row, column, most significant byte of the image id.
+                    int[] marks = {-1, -1, -1};
+                    int markCount = 0;
+                    int index = currentCharIndex + charsForCodePoint;
+                    while (index < charsUsedInLine) {
+                        char c = line[index];
+                        boolean pair = Character.isHighSurrogate(c) && index + 1 < charsUsedInLine;
+                        int cp = pair ? Character.toCodePoint(c, line[index + 1]) : c;
+                        if (WcWidth.width(cp) > 0) break;
+                        if (markCount < 3) marks[markCount++] = TerminalKitty.diacriticValue(cp);
+                        index += pair ? 2 : 1;
+                    }
+                    // The image id is the RAW foreground colour (before any palette or remap).
+                    final int fg = TextStyle.decodeForeColor(style);
+                    final int idLow = (fg & 0xff000000) == 0xff000000 ? (fg & 0xffffff) : (fg >= 0 && fg < 256 ? fg : 0);
+                    boolean sameAsLeft = placeholderPrevId == idLow;
+                    int imageRow = marks[0] >= 0 ? marks[0] : (sameAsLeft ? placeholderPrevRow : 0);
+                    int imageCol = marks[1] >= 0 ? marks[1] : (sameAsLeft && imageRow == placeholderPrevRow ? placeholderPrevCol + 1 : 0);
+                    int msb = marks[2] >= 0 ? marks[2] : (sameAsLeft ? placeholderPrevMsb : 0);
+                    int imageId = idLow | (msb << 24);
+                    if (imageId != 0) {
+                        Bitmap slice = kitty.placeholderSlice(imageId, 0, imageRow, imageCol,
+                            Math.max(1, mEmulator.getCellWidthPixels()), Math.max(1, mEmulator.getCellHeightPixels()), mPlaceholderSrc);
+                        if (slice != null) {
+                            float left = column * mFontWidth;
+                            float top = heightOffset - mFontLineSpacing;
+                            mPlaceholderDst.set(left, top, left + mFontWidth, top + mFontLineSpacing);
+                            canvas.drawBitmap(slice, mPlaceholderSrc, mPlaceholderDst, null);
+                        }
+                    }
+                    placeholderPrevId = idLow;
+                    placeholderPrevRow = imageRow;
+                    placeholderPrevCol = imageCol;
+                    placeholderPrevMsb = msb;
+
+                    column += 1;
+                    currentCharIndex = index;
+                    measuredWidthForRun = 0.f;
+                    lastRunStyle = style;
+                    lastRunInsideCursor = false;
+                    lastRunInsideSelection = false;
+                    lastRunStartColumn = column;
+                    lastRunStartIndex = currentCharIndex;
+                    lastRunFontWidthMismatch = false;
+                    continue;
+                }
                 if (TextStyle.isTerminalBitmap(style)) {
+                    // Fork fix (2026-10-30): draw the text run in front of the image cell first; upstream
+                    // dropped it, which erased e.g. a label printed on the same line before an image.
+                    if (lastRunStartColumn >= 0 && column > lastRunStartColumn) {
+                        int cursorColor = lastRunInsideCursor ? mEmulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_CURSOR] : 0;
+                        boolean invertCursorTextColor = lastRunInsideCursor && cursorShape == TerminalEmulator.TERMINAL_CURSOR_STYLE_BLOCK;
+                        drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, column - lastRunStartColumn,
+                            lastRunStartIndex, currentCharIndex - lastRunStartIndex, measuredWidthForRun,
+                            cursorColor, cursorShape, lastRunStyle, reverseVideo || invertCursorTextColor || lastRunInsideSelection);
+                    }
                     Bitmap bitmap = mEmulator.getScreen().getSixelBitmap(style);
                     if (bitmap != null) {
                         float left = column * mFontWidth;
@@ -114,13 +200,14 @@ public final class TerminalRenderer {
                         canvas.drawBitmap(bitmap, bitmapSrcRect, bitmapDestRect, null);
                     }
                     column += 1;
+                    currentCharIndex += charsForCodePoint;
                     measuredWidthForRun = 0.f;
                     lastRunStyle = 0;
                     lastRunInsideCursor = false;
-                    lastRunStartColumn = column + 1;
+                    lastRunInsideSelection = false;
+                    lastRunStartColumn = column;
                     lastRunStartIndex = currentCharIndex;
                     lastRunFontWidthMismatch = false;
-                    currentCharIndex += charsForCodePoint;
                     continue;
                 }
                 final int codePointWcWidth = WcWidth.width(codePoint);

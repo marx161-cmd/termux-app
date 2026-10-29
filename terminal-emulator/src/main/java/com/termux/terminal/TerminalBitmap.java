@@ -391,6 +391,11 @@ public class TerminalBitmap {
     }
 
 
+    /** Kitty animation: show another frame (same or smaller size) in the same cells. */
+    void replaceBitmapForKitty(Bitmap bitmap) {
+        mBitmap = bitmap;
+    }
+
     public int getBitmapNum() {
         return mBitmapNum;
     }

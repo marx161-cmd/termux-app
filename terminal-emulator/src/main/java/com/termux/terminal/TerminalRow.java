@@ -52,6 +52,9 @@ public final class TerminalRow {
     /** If this row has a {@link TerminalBitmap}. Used for performance only. */
     public boolean mHasTerminalBitmap;
 
+    /** Fork addition: id of a kitty `z<0` image anchored to this row (0 = none), see {@link TerminalKitty}. */
+    public long mKittyAnchor;
+
     /** Construct a blank row (containing only whitespace, ' ') with a specified style. */
     public TerminalRow(int columns, long style) {
         mColumns = columns;
@@ -149,6 +152,7 @@ public final class TerminalRow {
         mSpaceUsed = mColumns;
         mHasNonOneWidthOrSurrogateChars = false;
         mHasTerminalBitmap = false;
+        mKittyAnchor = 0;
     }
 
     // https://github.com/steven676/Android-Terminal-Emulator/commit/9a47042620bec87617f0b4f5d50568535668fe26

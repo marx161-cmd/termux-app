@@ -86,3 +86,14 @@ feedback, JDSP audio uniforms, FPS_CAP etc. come for free — no second renderer
   No JDSP gating / onset fallback (first version had them; dropped to match the status bar).
 - Shader `~/shaders/termux/extrakeys.agsl` = statusbar.agsl's iEvent-2 path, chroma in comrade red/teal.
 - 2026-10-30 ~00:25 APPROVED live ("yeag 🔥") after dropping the white sweep front (too much on the tall row).
+
+## 2026-10-30 — kitty graphics part 2 DONE (all four deferred TODOs above), verified on the Pixel
+- [x] `t=s`: Termux's shm_open files `$PREFIX/tmp/<name>`, read then deleted (verified: segment gone).
+- [x] `z<0`: under-the-text layer, anchored via `TerminalRow.mKittyAnchor` (scrolls with the row, cleared on reuse,
+  both screens kept); drawn by a renderer pre-pass. Not kept across a terminal resize (rows are rebuilt).
+- [x] `U=1`: virtual placements + U+10EEEE cells (kitty's 297-entry diacritics table, left-neighbour inheritance,
+  id from the RAW fg colour before our teal/red remap). Verified inside tmux (allow-passthrough on).
+  Placement-id-by-underline-colour is not supported (Termux stores no underline colour) -> newest placement wins.
+- [x] Animation: `a=f` (new/edit frame, base frame, background colour, blend/overwrite), `a=a` (s/c/r+z/v),
+  `a=c` (compose); main-thread ticker, redraw via TerminalSession.notifyScreenUpdate. User: "perfect, animation works 🔥".
+- Also fixed (upstream bug): text in front of an image cell on the same line was dropped by the renderer.

@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <color name="ic_launcher_background">#00A478</color>
     <color name="termux_extra_keys_background">#250810</color>
     <color name="termux_extra_keys_background_active">#4A1120</color>
     <color name="termux_extra_keys_text">#66D9FF</color>

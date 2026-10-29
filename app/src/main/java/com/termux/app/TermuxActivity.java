@@ -98,6 +98,8 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
      *  {@link TerminalView} and {@link TermuxActivity}.
      */
     TermuxTerminalViewClient mTermuxTerminalViewClient;
+    /** Fork addition: live shader backdrop behind the terminal (scope.md 2026-10-30). */
+    private com.termux.app.terminal.TermuxBackdrop mTermuxBackdrop;
 
     /**
      *  The {@link TerminalSessionClient} interface implementation to allow for communication between
@@ -247,6 +249,9 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
         setTerminalToolbarView(savedInstanceState);
 
+        mTermuxBackdrop = new com.termux.app.terminal.TermuxBackdrop(this);
+        mTermuxBackdrop.reload();
+
         setSettingsButtonView();
 
         setNewSessionButtonView();
@@ -297,6 +302,8 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         if (mTermuxTerminalViewClient != null)
             mTermuxTerminalViewClient.onStart();
 
+        if (mTermuxBackdrop != null) mTermuxBackdrop.onStart();
+
         if (mPreferences.isTerminalMarginAdjustmentEnabled())
             addTermuxActivityRootViewGlobalLayoutListener();
 
@@ -339,6 +346,8 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
         if (mTermuxTerminalViewClient != null)
             mTermuxTerminalViewClient.onStop();
+
+        if (mTermuxBackdrop != null) mTermuxBackdrop.onStop();
 
         removeTermuxActivityRootViewGlobalLayoutListener();
 
@@ -997,6 +1006,7 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
         if (mTermuxTerminalSessionActivityClient != null)
             mTermuxTerminalSessionActivityClient.onReloadActivityStyling();
+        if (mTermuxBackdrop != null) mTermuxBackdrop.reload();
 
         if (mTermuxTerminalViewClient != null)
             mTermuxTerminalViewClient.onReloadActivityStyling();

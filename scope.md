@@ -69,3 +69,13 @@ as AGSL RenderEffect on the real keys, fed by bands.bin + beat clock (SpectreBoa
 - Edge to edge: `terminal-margin-horizontal` now applies to the terminal (DrawerLayout) only.
 - Thin (1 px) red border on top + sides with 45-degree cut top corners (`ChamferedRowDrawable`), no bottom edge;
   keys are transparent so the row background shows. The bottom-space strip takes the row colour (no black gap).
+
+## 2026-10-30 — Termux backdrop rendered by ShaderEditor (BackdropService) — decided with the user
+User: "shader_105 ... much darker as backdrop", "no freezing, let the chirp backdrop pulse to audio".
+Architecture (mine, flagged to the user): ShaderEditor gains a bound `BackdropService`; Termux (same UID 1000)
+binds it and passes a `Surface` from a `TextureView` behind the terminal text; ShaderEditor renders into it with
+its normal `ShaderView` (same `getHolder()` override trick as the wallpaper engine), so multipass/`==spark==`
+feedback, JDSP audio uniforms, FPS_CAP etc. come for free — no second renderer in Termux.
+- Shader file `~/shaders/termux/backdrop.glsl` (Termux home), hot reload by mtime (<=1 s).
+- Termux config `~/.termux/backdrop.properties`: `enabled`, `shader`, `dim` (TextureView alpha over black),
+  `quality` (render scale). Runs only between Termux onStart/onStop; no idle freeze.

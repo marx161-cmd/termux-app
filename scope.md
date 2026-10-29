@@ -85,3 +85,4 @@ feedback, JDSP audio uniforms, FPS_CAP etc. come for free — no second renderer
   comrade's `go` clock), each new beat = one 220 ms burst at full frame rate, effect removed between bursts.
   No JDSP gating / onset fallback (first version had them; dropped to match the status bar).
 - Shader `~/shaders/termux/extrakeys.agsl` = statusbar.agsl's iEvent-2 path, chroma in comrade red/teal.
+- 2026-10-30 ~00:25 APPROVED live ("yeag 🔥") after dropping the white sweep front (too much on the tall row).

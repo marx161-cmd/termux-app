@@ -1,5 +1,11 @@
 package com.termux.app.terminal;
 
+import java.util.Map;
+import java.util.List;
+import java.util.HashMap;
+import java.util.ArrayList;
+import com.termux.view.TerminalView;
+import com.termux.view.TerminalPets;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
@@ -65,6 +71,9 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
 
     private Typeface mBundledDefaultTypeface;
 
+    /** Fork addition: pets run only between onStart() and onStop(). */
+    private boolean mPetsActive;
+
     public TermuxTerminalSessionActivityClient(TermuxActivity activity) {
         this.mActivity = activity;
     }
@@ -92,6 +101,10 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
         // The current terminal session may have changed while being away, force
         // a refresh of the displayed terminal.
         mActivity.getTerminalView().onScreenUpdated();
+
+        mPetsActive = true;
+        TerminalPets pets = mActivity.getTerminalView().getPets();
+        if (pets != null) pets.setActive(true);
     }
 
     /**
@@ -108,6 +121,10 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
      * Should be called when mActivity.onStop() is called
      */
     public void onStop() {
+        mPetsActive = false;
+        TerminalPets pets = mActivity.getTerminalView().getPets();
+        if (pets != null) pets.setActive(false);
+
         // Store current session in shared preferences so that it can be restored later in
         // {@link #onStart} if needed.
         setCurrentStoredSession();
@@ -531,6 +548,84 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
         } catch (Exception e) {
             Logger.logStackTraceWithMessage(LOG_TAG, "Error in checkForFontAndColors()", e);
         }
+        loadPets();
+    }
+
+    /**
+     * Fork addition (scope.md 2026-10-29): load `~/.termux/pets/pets.properties`
+     * (`cursor=<slug>`, `rows=<slug>,<slug>`, `enabled=false` to switch off) and the
+     * `<slug>_atlas.png` / `<slug>_index.txt` / `<slug>_map.json` sheets from
+     * `shaderfx/tools/aneko_atlas.py` next to it. Missing or broken files just mean no pets.
+     */
+    private void loadPets() {
+        TerminalView view = mActivity.getTerminalView();
+        File dir = new File(TermuxConstants.TERMUX_DATA_HOME_DIR_PATH, "pets");
+        File config = new File(dir, "pets.properties");
+        TerminalPets pets = null;
+        try {
+            if (config.isFile()) {
+                Properties props = new Properties();
+                try (InputStream in = new FileInputStream(config)) {
+                    props.load(in);
+                }
+                if (!"false".equals(props.getProperty("enabled", "true").trim())) {
+                    TerminalPets.Sheet cursor = loadPetSheet(dir, props.getProperty("cursor", "").trim());
+                    List<TerminalPets.Sheet> rows = new ArrayList<>();
+                    for (String slug : props.getProperty("rows", "").split(",")) {
+                        TerminalPets.Sheet sheet = loadPetSheet(dir, slug.trim());
+                        if (sheet != null) rows.add(sheet);
+                    }
+                    if (cursor != null || !rows.isEmpty()) pets = new TerminalPets(view, cursor, rows);
+                }
+            }
+        } catch (Exception e) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "Error loading pets", e);
+            pets = null;
+        }
+        view.setPets(pets);
+        if (pets != null && mPetsActive) pets.setActive(true);
+    }
+
+    private TerminalPets.Sheet loadPetSheet(File dir, String slug) throws Exception {
+        if (slug.isEmpty()) return null;
+        File atlas = new File(dir, slug + "_atlas.png");
+        File index = new File(dir, slug + "_index.txt");
+        File map = new File(dir, slug + "_map.json");
+        if (!atlas.isFile() || !index.isFile() || !map.isFile()) {
+            Logger.logError(LOG_TAG, "Pet '" + slug + "' is missing its sheet files in " + dir);
+            return null;
+        }
+
+        // Header: `# cols=8 cell=64x64 ...`
+        int columns = 8, cell = 0;
+        try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(index))) {
+            String header = reader.readLine();
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("cols=(\\d+)\\s+cell=(\\d+)x").matcher(header == null ? "" : header);
+            if (m.find()) {
+                columns = Integer.parseInt(m.group(1));
+                cell = Integer.parseInt(m.group(2));
+            }
+        }
+        if (cell <= 0) throw new IllegalArgumentException("Bad pet index header in " + index);
+
+        java.io.ByteArrayOutputStream jsonBytes = new java.io.ByteArrayOutputStream();
+        try (InputStream in = new FileInputStream(map)) {
+            byte[] buffer = new byte[8192];
+            for (int n; (n = in.read(buffer)) > 0; ) jsonBytes.write(buffer, 0, n);
+        }
+        byte[] json = jsonBytes.toByteArray();
+        org.json.JSONObject slots = new org.json.JSONObject(new String(json, java.nio.charset.StandardCharsets.UTF_8)).getJSONObject("slots");
+        Map<String, Integer> slotFrames = new HashMap<>();
+        for (java.util.Iterator<String> it = slots.keys(); it.hasNext(); ) {
+            String name = it.next();
+            slotFrames.put(name, slots.getJSONObject(name).getInt("index"));
+        }
+
+        android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
+        options.inScaled = false;
+        android.graphics.Bitmap bitmap = android.graphics.BitmapFactory.decodeFile(atlas.getPath(), options);
+        if (bitmap == null) throw new IllegalArgumentException("Cannot decode " + atlas);
+        return new TerminalPets.Sheet(bitmap, cell, columns, slotFrames);
     }
 
     private Typeface getTerminalTypeface(File fontFile) {

@@ -68,6 +68,9 @@ public final class TerminalView extends View {
 
     /** The top row of text to display. Ranges from -activeTranscriptRows to 0. */
     int mTopRow;
+
+    /** Fork addition: ANeko pets drawn in this view's overlay, see {@link TerminalPets}. */
+    private TerminalPets mPets;
     int[] mDefaultSelectors = new int[]{-1,-1,-1,-1};
 
     float mScaleFactor = 1.f;
@@ -458,6 +461,7 @@ public final class TerminalView extends View {
 
     public void onScreenUpdated(boolean skipScrolling) {
         if (mEmulator == null) return;
+        if (mPets != null) mPets.onScreenUpdated();
 
         int rowsInHistory = mEmulator.getScreen().getActiveTranscriptRows();
         if (mTopRow < -rowsInHistory) setTopRow(-rowsInHistory);
@@ -976,6 +980,7 @@ public final class TerminalView extends View {
      */
     @Override
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        if (mPets != null) mPets.onSizeChanged(w, h);
         updateSize();
     }
 
@@ -1032,6 +1037,17 @@ public final class TerminalView extends View {
             // render the text selection handles
             renderTextSelection();
         }
+    }
+
+    /** Replace the pets (null removes them). Call {@link TerminalPets#setActive(boolean)} to run them. */
+    public void setPets(TerminalPets pets) {
+        if (mPets != null) mPets.detach();
+        mPets = pets;
+        if (mPets != null) mPets.attach();
+    }
+
+    public TerminalPets getPets() {
+        return mPets;
     }
 
     public TerminalSession getCurrentSession() {

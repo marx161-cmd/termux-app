@@ -30,3 +30,32 @@ Sixel/iTerm. New code goes in its own `TerminalKitty.java`.
 - [ ] Images drawn behind text (negative `z=` index).
 - [ ] Shared-memory transfer (`t=s`).
 - [ ] tmux support via Unicode placeholders (`U=1`, U+10EEEE).
+
+## 2026-10-29 (later) — Termux look: colours, backdrop, pets, extra-keys glitch (decided with the user)
+
+**Kitty part 2** (the four deferred TODOs above) stays open, still wanted. Correction to my earlier claim: `t=s`
+IS usable — Termux's `shm_open` stores segments as plain files in `$PREFIX/tmp/<name>` (verified on the Pixel),
+same UID as the app, so `t=s` = open that name there, read, unlink. `z<0` shares the "behind the text" layer below.
+
+**Colours** (user: "teal text, all tinted text is red, shades of each for distinct ones"; "yes force them"):
+- Default foreground and the greys/whites (palette 0,7,8,15) = teal shades; every coloured ANSI entry (1-6, 9-14)
+  = its own distinct red shade. Base colours = the comrade palette (teal #66FFE8, red #FF0062).
+- FORCED for 256-colour and truecolor too (they bypass colors.properties): a remap in our renderer/colour code —
+  greys -> teal at the same lightness, saturated -> red family, hue spread kept so colours stay distinct.
+
+**Backdrop:** shader_105-like (the Pixel's `~/shaders/shader_105.glsl`, "chirp"/spark ridges) but much darker,
+behind transparent terminal text. Needs full GLES (2 passes + `spark` feedback buffer), not AGSL -> reuse our
+ShaderEditor fork's renderer rather than writing a second one. **No idle freeze** (user): it keeps pulsing to
+audio (JDSP bands / beat). Runs only while Termux is on screen.
+
+**Pets** (cell-exact: the terminal buffer knows the cursor and every empty row):
+- Neko chases the cursor (run to it, sit, sleep when idle, startle on output bursts).
+- A second ANeko skin walks through EMPTY rows only, never over text.
+- Sprites via `shaderfx/tools/aneko_atlas.py` (438-skin catalog, canonical slot layout) so skins are swappable.
+  Second skin: user to pick.
+
+**Extra-keys row:** the status bar's beat glitch (`shaderfx/shaders/live/statusbar.agsl`, iEvent 2 row-band tears),
+as AGSL RenderEffect on the real keys, fed by bands.bin + beat clock (SpectreBoard's BandsFeed/BeatSource pattern).
+
+**Order:** colours first (fastest visible win), then backdrop, pets, extra-keys glitch; kitty part 2 alongside
+(`z<0` with the backdrop layer).

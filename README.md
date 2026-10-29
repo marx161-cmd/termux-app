@@ -1,5 +1,8 @@
 # Termux application
 
+> [!NOTE]
+> This fork is part of a personal hobby-project collection. It is shared because it works for my setup, but there is no promise of regular maintenance, fast support, or long-term compatibility updates.
+
 [![Build status](https://github.com/termux/termux-app/workflows/Build/badge.svg)](https://github.com/termux/termux-app/actions)
 [![Testing status](https://github.com/termux/termux-app/workflows/Unit%20tests/badge.svg)](https://github.com/termux/termux-app/actions)
 [![Join the chat at https://gitter.im/termux/termux](https://badges.gitter.im/termux/termux.svg)](https://gitter.im/termux/termux)
@@ -12,6 +15,13 @@
 Note that this repository is for the app itself (the user interface and the terminal emulation). For the packages installable inside the app, see [termux/termux-packages](https://github.com/termux/termux-packages).
 
 Quick how-to about Termux package management is available at [Package Management](https://github.com/termux/termux-packages/wiki/Package-Management). It also has info on how to fix **`repository is under maintenance or down`** errors when running `apt` or `pkg` commands.
+
+This fork also carries terminal feature work that builds on ideas and code from the wider Termux fork ecosystem, especially the Termux Monet fork:
+- https://github.com/Termux-Monet/termux-monet
+- https://github.com/HardcodedCat/termux-monet
+- https://github.com/MatanZ/termux-app/tree/sixel2
+
+In particular, the Sixel and OSC 1337/iTerm2-style inline image support did not originate from scratch in this fork and should be understood in that lineage.
 
 **We are looking for Termux Android application maintainers.**
 

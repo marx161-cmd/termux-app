@@ -1,0 +1,107 @@
+#!/data/data/com.termux/files/usr/bin/sh
+set -eu
+
+TERMUX_FONT_DIR="${HOME}/.termux"
+TERMUX_FONT_FILE="${TERMUX_FONT_DIR}/font.ttf"
+TERMUX_FONT_MODES_DIR="${TERMUX_FONT_DIR}/font-modes"
+
+reload_termux() {
+    if command -v termux-reload-settings >/dev/null 2>&1; then
+        termux-reload-settings
+    else
+        printf '%s\n' "font mode changed; reload Termux settings manually if needed" >&2
+    fi
+}
+
+usage() {
+    cat <<'EOF'
+Usage:
+  termux-font-mode list
+  termux-font-mode current
+  termux-font-mode normal
+  termux-font-mode fun <name>
+  termux-font-mode path <font-file>
+
+Modes:
+  normal       remove ~/.termux/font.ttf and use bundled Space Mono
+  fun <name>   copy ~/.termux/font-modes/<name> to ~/.termux/font.ttf
+  path <file>  copy an explicit font file to ~/.termux/font.ttf
+EOF
+}
+
+list_fonts() {
+    if [ ! -d "$TERMUX_FONT_MODES_DIR" ]; then
+        return 0
+    fi
+    find "$TERMUX_FONT_MODES_DIR" -maxdepth 1 -type f ! -name '.*' -printf '%f\n' | sort
+}
+
+resolve_font_name() {
+    name="$1"
+    if [ -f "$TERMUX_FONT_MODES_DIR/$name" ]; then
+        printf '%s\n' "$TERMUX_FONT_MODES_DIR/$name"
+        return 0
+    fi
+
+    match=$(find "$TERMUX_FONT_MODES_DIR" -maxdepth 1 -type f ! -name '.*' \
+        \( -name "$name" -o -name "$name.ttf" -o -name "$name.otf" \) | head -n 1)
+    if [ -n "${match:-}" ]; then
+        printf '%s\n' "$match"
+        return 0
+    fi
+    return 1
+}
+
+current_mode() {
+    if [ -f "$TERMUX_FONT_FILE" ] && [ -s "$TERMUX_FONT_FILE" ]; then
+        printf '%s\n' "override"
+    else
+        printf '%s\n' "normal"
+    fi
+}
+
+command="${1:-}"
+case "$command" in
+    list)
+        list_fonts
+        ;;
+    current)
+        current_mode
+        ;;
+    normal)
+        rm -f "$TERMUX_FONT_FILE"
+        reload_termux
+        ;;
+    fun)
+        name="${2:-}"
+        if [ -z "$name" ]; then
+            usage >&2
+            exit 1
+        fi
+        if [ ! -d "$TERMUX_FONT_MODES_DIR" ]; then
+            printf '%s\n' "font modes directory not found: $TERMUX_FONT_MODES_DIR" >&2
+            exit 1
+        fi
+        font_path=$(resolve_font_name "$name") || {
+            printf '%s\n' "font not found in $TERMUX_FONT_MODES_DIR: $name" >&2
+            exit 1
+        }
+        mkdir -p "$TERMUX_FONT_DIR"
+        cp "$font_path" "$TERMUX_FONT_FILE"
+        reload_termux
+        ;;
+    path)
+        font_path="${2:-}"
+        if [ -z "$font_path" ] || [ ! -f "$font_path" ]; then
+            printf '%s\n' "font file not found: ${font_path:-}" >&2
+            exit 1
+        fi
+        mkdir -p "$TERMUX_FONT_DIR"
+        cp "$font_path" "$TERMUX_FONT_FILE"
+        reload_termux
+        ;;
+    *)
+        usage >&2
+        exit 1
+        ;;
+esac

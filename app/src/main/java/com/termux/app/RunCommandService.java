@@ -4,6 +4,9 @@ import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
+
+import androidx.core.app.ServiceCompat;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Build;
@@ -260,7 +263,12 @@ public class RunCommandService extends Service {
     private void runStartForeground() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             setupNotificationChannel();
-            startForeground(TermuxConstants.TERMUX_RUN_COMMAND_NOTIFICATION_ID, buildNotification());
+            // A required foregroundServiceType declaration (added on Q+, unconditionally
+            // enforced once running under android.uid.system regardless of targetSdk) doesn't
+            // fit any of the standard categories for one-off command execution, so specialUse
+            // is correct.
+            ServiceCompat.startForeground(this, TermuxConstants.TERMUX_RUN_COMMAND_NOTIFICATION_ID, buildNotification(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         }
     }
 

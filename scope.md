@@ -79,3 +79,9 @@ feedback, JDSP audio uniforms, FPS_CAP etc. come for free — no second renderer
 - Shader file `~/shaders/termux/backdrop.glsl` (Termux home), hot reload by mtime (<=1 s).
 - Termux config `~/.termux/backdrop.properties`: `enabled`, `shader`, `dim` (TextureView alpha over black),
   `quality` (render scale). Runs only between Termux onStart/onStop; no idle freeze.
+
+## 2026-10-30 — extra-keys beat glitch (user: "exactly like the status bar")
+- `ExtraKeysShaderFx` mirrors shaderfx `StatusBarFx`: 100 ms beat watcher on BeatSource (cached song map, else
+  comrade's `go` clock), each new beat = one 220 ms burst at full frame rate, effect removed between bursts.
+  No JDSP gating / onset fallback (first version had them; dropped to match the status bar).
+- Shader `~/shaders/termux/extrakeys.agsl` = statusbar.agsl's iEvent-2 path, chroma in comrade red/teal.

@@ -530,6 +530,8 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         terminalToolbarViewPager.setBackground(new com.termux.app.terminal.ChamferedRowDrawable(
             getColor(R.color.termux_extra_keys_background), getColor(R.color.termux_extra_keys_border),
             1f, 8f * getResources().getDisplayMetrics().density));
+        // Fork addition (scope.md 2026-10-30): the status bar's beat glitch on the row (~/shaders/termux/extrakeys.agsl).
+        new com.termux.app.shader.ExtraKeysShader().attach(terminalToolbarViewPager);
         if (mPreferences.shouldShowTerminalToolbar()) terminalToolbarViewPager.setVisibility(View.VISIBLE);
 
         ViewGroup.LayoutParams layoutParams = terminalToolbarViewPager.getLayoutParams();

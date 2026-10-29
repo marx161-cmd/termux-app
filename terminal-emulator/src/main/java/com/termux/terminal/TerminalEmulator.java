@@ -351,6 +351,9 @@ public final class TerminalEmulator {
     /** The {@link ITermImage} if an iTerm image command is being processed. */
     private ITermImage mITermImage;
 
+    /** Kitty graphics protocol state (stored images, placements, chunked transfers). */
+    private TerminalKitty mKitty;
+
 
 
     /**
@@ -2094,6 +2097,8 @@ public final class TerminalEmulator {
                 break;
             case '_': // APC - Application Program Command.
                 clearTerminalControlArgs();
+                // Kitty graphics commands (`APC G`) may carry a whole image in one command.
+                setTerminalControlArgsMaxLength(TerminalBitmap.MAX_BITMAP_SIZE / 3 * 4 + 4096);
                 continueSequence(ESC_APC);
                 break;
             default:
@@ -2607,8 +2612,8 @@ public final class TerminalEmulator {
     private void receiveApcEsc(final int b) {
         switch (b) {
             case '\\':
-                //doApc();
-                //clearApcTypeVariables();
+                doApc();
+                clearApcTypeVariables();
                 break;
             default:
                 // The ESC character was not followed by a \, so insert the ESC and
@@ -2628,7 +2633,27 @@ public final class TerminalEmulator {
     /**
      * Do {@link #ESC_APC}. Check its docs for more info.
      */
-    private void doApc() {}
+    private void doApc() {
+        if (mTerminalControlArgs.length() > 0 && mTerminalControlArgs.charAt(0) == 'G') {
+            // Kitty graphics protocol: `APC G <control data> ; <payload> ST`.
+            mKitty.handleCommand(mTerminalControlArgs.subSequence(1, mTerminalControlArgs.length()));
+        }
+        clearTerminalControlArgs();
+    }
+
+    /** Used by {@link TerminalKitty} to move the cursor after a placement. */
+    void setCursorPositionForKitty(int row, int col) {
+        setCursorRowCol(row, col);
+    }
+
+    /** Used by {@link TerminalKitty} to send protocol responses. */
+    void writeToSessionForKitty(String data) {
+        mSession.write(data);
+    }
+
+    TerminalSessionClient getClientForKitty() {
+        return mClient;
+    }
 
 
 
@@ -3517,6 +3542,7 @@ public final class TerminalEmulator {
         clearTerminalControlArgs();
         clearOscTypeVariables();
         mITermImage = null;
+        mKitty = new TerminalKitty(this);
     }
 
     public String getSelectedText(int x1, int y1, int x2, int y2) {

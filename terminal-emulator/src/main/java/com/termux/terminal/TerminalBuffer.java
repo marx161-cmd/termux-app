@@ -707,6 +707,60 @@ public final class TerminalBuffer {
     }
 
 
+    /** Stamp a decoded kitty graphics image into the screen at `x`, `y`. See {@link TerminalKitty}. */
+    public synchronized TerminalBitmap addTerminalBitmapForKitty(Bitmap bitmap, int x, int y, int cellW, int cellH) {
+        int bitmapNum = getFreeTerminalBitmapNum();
+        if (bitmapNum < TERMINAL_BITMAP__NUM_START) {
+            Logger.logError(mClient, LOG_TAG, "Cannot create more than " + TERMINAL_BITMAP__NUM_END + " bitmaps");
+            return null;
+        }
+
+        TerminalBitmap terminalBitmap = TerminalBitmap.build(this, bitmapNum, bitmap, x, y, cellW, cellH);
+        if (terminalBitmap == null || terminalBitmap.getBitmap() == null) {
+            return null;
+        }
+        mTerminalBitmaps.put(bitmapNum, terminalBitmap);
+
+        doTerminalBitmapsGC(30000);
+        return terminalBitmap;
+    }
+
+    /** If `terminalBitmap` is still loaded, i.e. not scrolled out, garbage collected or cleared. */
+    public synchronized boolean isTerminalBitmapAlive(TerminalBitmap terminalBitmap) {
+        return mTerminalBitmaps.get(terminalBitmap.getBitmapNum()) == terminalBitmap;
+    }
+
+    /** The {@link TerminalBitmap} drawn at screen `column`, `row`, if any. */
+    public synchronized TerminalBitmap getTerminalBitmapAt(int column, int row) {
+        if (column < 0 || column >= mColumns || row < 0 || row >= mScreenRows) return null;
+        TerminalRow line = mLines[externalToInternalRow(row)];
+        if (line == null || !line.mHasTerminalBitmap) return null;
+        return getTerminalBitmap(line.getStyle(column));
+    }
+
+    /** Remove `terminalBitmaps` and blank every cell that draws them. */
+    public synchronized void removeTerminalBitmaps(java.util.Collection<TerminalBitmap> terminalBitmaps) {
+        Set<Integer> bitmapNums = new HashSet<>();
+        for (TerminalBitmap terminalBitmap : terminalBitmaps) {
+            int bitmapNum = terminalBitmap.getBitmapNum();
+            if (mTerminalBitmaps.get(bitmapNum) == terminalBitmap) bitmapNums.add(bitmapNum);
+        }
+        if (bitmapNums.isEmpty()) return;
+
+        for (TerminalRow line : mLines) {
+            if (line == null || !line.mHasTerminalBitmap) continue;
+            for (int column = 0; column < mColumns; column++) {
+                if (bitmapNums.contains(TextStyle.getTerminalBitmapNum(line.getStyle(column)))) {
+                    line.setChar(column, ' ', TextStyle.NORMAL);
+                }
+            }
+        }
+        for (Integer bitmapNum : bitmapNums) {
+            mTerminalBitmaps.remove(bitmapNum);
+        }
+    }
+
+
     /** Remove bitmaps that are completely scrolled out. */
     public synchronized void removeScrolledOutTerminalBitmaps(int row) {
         Set<Integer> bitmapsToRemove = new HashSet<>();

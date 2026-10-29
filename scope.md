@@ -63,3 +63,9 @@ as AGSL RenderEffect on the real keys, fed by bands.bin + beat clock (SpectreBoa
 ## 2026-10-29 (later) — pets decided
 - Neko chases the cursor. **Caza** (detailed TIE fighter, nqmgaming) **and MicroBot** both walk/fly through the
   empty rows, never over text. Gastly ruled out (no sleep/scratch frames). Sheets from `aneko_atlas.py`.
+
+## 2026-10-29 (later) — extra-keys row restyled (user, live)
+- Direct extension of SpectreBoard's toolbar: bg #0D0004, teal #66FFE8 text, active = red #FF0062 on #2A000F.
+- Edge to edge: `terminal-margin-horizontal` now applies to the terminal (DrawerLayout) only.
+- Thin (1 px) red border on top + sides with 45-degree cut top corners (`ChamferedRowDrawable`), no bottom edge;
+  keys are transparent so the row background shows. The bottom-space strip takes the row colour (no black gap).

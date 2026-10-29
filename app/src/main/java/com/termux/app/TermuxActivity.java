@@ -467,7 +467,10 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         RelativeLayout relativeLayout = findViewById(R.id.activity_termux_root_relative_layout);
         int marginHorizontal = mProperties.getTerminalMarginHorizontal();
         int marginVertical = mProperties.getTerminalMarginVertical();
-        ViewUtils.setLayoutMarginsInDp(relativeLayout, marginHorizontal, marginVertical, marginHorizontal, marginVertical);
+        // Fork change (scope.md 2026-10-29): the horizontal margin applies to the terminal area only,
+        // so the extra-keys row runs edge to edge as an extension of the keyboard below it.
+        ViewUtils.setLayoutMarginsInDp(relativeLayout, 0, marginVertical, 0, marginVertical);
+        ViewUtils.setLayoutMarginsInDp(findViewById(R.id.drawer_layout), marginHorizontal, 0, marginHorizontal, 0);
     }
 
 
@@ -514,6 +517,10 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             mTermuxTerminalViewClient, mTermuxTerminalSessionActivityClient);
 
         final ViewPager terminalToolbarViewPager = getTerminalToolbarViewPager();
+        // Fork addition (scope.md 2026-10-29): cut top corners + thin red border, see ChamferedRowDrawable.
+        terminalToolbarViewPager.setBackground(new com.termux.app.terminal.ChamferedRowDrawable(
+            getColor(R.color.termux_extra_keys_background), getColor(R.color.termux_extra_keys_border),
+            1f, 8f * getResources().getDisplayMetrics().density));
         if (mPreferences.shouldShowTerminalToolbar()) terminalToolbarViewPager.setVisibility(View.VISIBLE);
 
         ViewGroup.LayoutParams layoutParams = terminalToolbarViewPager.getLayoutParams();

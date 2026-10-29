@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fork addition (scope.md 2026-10-29): the extra-keys row as a direct extension of SpectreBoard's
+     toolbar (#0D0004), with a 1 px red (#FF0062) border on top and sides only; no bottom edge, so it
+     joins the keyboard. The ViewPager gets 1 px padding on those sides so the keys don't cover it. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/termux_extra_keys_border" />
+        </shape>
+    </item>
+    <item android:left="1px" android:top="1px" android:right="1px">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/termux_extra_keys_background" />
+        </shape>
+    </item>
+</layer-list>

@@ -42,7 +42,7 @@
         <!-- Extra keys colors. -->
         <item name="extraKeysButtonTextColor">@color/termux_extra_keys_text</item>
         <item name="extraKeysButtonActiveTextColor">@color/termux_extra_keys_text_active</item>
-        <item name="extraKeysButtonBackgroundColor">@color/termux_extra_keys_background</item>
+        <item name="extraKeysButtonBackgroundColor">@android:color/transparent</item>
         <item name="extraKeysButtonActiveBackgroundColor">@color/termux_extra_keys_background_active</item>
     </style>
 

@@ -59,3 +59,7 @@ as AGSL RenderEffect on the real keys, fed by bands.bin + beat clock (SpectreBoa
 
 **Order:** colours first (fastest visible win), then backdrop, pets, extra-keys glitch; kitty part 2 alongside
 (`z<0` with the backdrop layer).
+
+## 2026-10-29 (later) — pets decided
+- Neko chases the cursor. **Caza** (detailed TIE fighter, nqmgaming) **and MicroBot** both walk/fly through the
+  empty rows, never over text. Gastly ruled out (no sleep/scratch frames). Sheets from `aneko_atlas.py`.

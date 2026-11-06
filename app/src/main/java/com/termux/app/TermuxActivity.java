@@ -905,6 +905,11 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         return mTermuxTerminalViewClient;
     }
 
+    /** Fork addition: the shader / wallpaper backdrop (may be null before onCreate finishes). */
+    public com.termux.app.terminal.TermuxBackdrop getTermuxBackdrop() {
+        return mTermuxBackdrop;
+    }
+
     public TermuxTerminalSessionActivityClient getTermuxTerminalSessionClient() {
         return mTermuxTerminalSessionActivityClient;
     }

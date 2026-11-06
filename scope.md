@@ -97,3 +97,12 @@ feedback, JDSP audio uniforms, FPS_CAP etc. come for free — no second renderer
 - [x] Animation: `a=f` (new/edit frame, base frame, background colour, blend/overwrite), `a=a` (s/c/r+z/v),
   `a=c` (compose); main-thread ticker, redraw via TerminalSession.notifyScreenUpdate. User: "perfect, animation works 🔥".
 - Also fixed (upstream bug): text in front of an image cell on the same line was dropped by the renderer.
+
+## 2026-11-06 — backdrop `mode=wallpaper` (user request)
+- User: instead of Termux's own backdrop shader, make Termux transparent so the HOME-SCREEN live wallpaper shows
+  through, like MiXplorer does (user screenshot), "just a tad more darkened".
+- `~/.termux/backdrop.properties` `mode=wallpaper` (default `shader` = unchanged behaviour): no BackdropService
+  binding / TextureView; window gets FLAG_SHOW_WALLPAPER + PixelFormat.TRANSLUCENT; the decor background (terminal
+  background colour) is painted with alpha (1 - dim), so `dim` still means "how much backdrop shows through".
+- Trade-off told to the user: the wallpaper (e.g. ringbox 30 fps) keeps rendering while Termux is in front ->
+  more heat/battery than the cheap chirp shader; mode is a one-line switch back.

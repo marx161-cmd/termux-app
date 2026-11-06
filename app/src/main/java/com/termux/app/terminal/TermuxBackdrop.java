@@ -4,6 +4,8 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.graphics.Color;
+import android.graphics.PixelFormat;
 import android.graphics.SurfaceTexture;
 import android.os.Bundle;
 import android.os.IBinder;
@@ -13,6 +15,7 @@ import android.os.RemoteException;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.widget.RelativeLayout;
 
 import androidx.annotation.NonNull;
@@ -36,6 +39,9 @@ import java.util.Properties;
  * Config `~/.termux/backdrop.properties`:
  * `enabled` (default true when the file exists), `shader` (default ~/shaders/termux/backdrop.glsl),
  * `dim` (view alpha 0..1, default 0.35), `quality` (render scale, default 0.5).
+ * `mode` = `shader` (default, the above) or `wallpaper` (2026-11-06): no own shader; the window shows the
+ * home-screen live wallpaper behind it and the terminal background is drawn black at alpha (1 - dim), so
+ * `dim` keeps its meaning (how much of the backdrop shows through).
  * Rendering only runs between {@link #onStart()} and {@link #onStop()}.
  */
 public final class TermuxBackdrop implements TextureView.SurfaceTextureListener {
@@ -57,6 +63,8 @@ public final class TermuxBackdrop implements TextureView.SurfaceTextureListener 
     private String mShaderPath;
     private float mDim = 0.35f;
     private float mQuality = 0.5f;
+    private boolean mWallpaper;
+    private boolean mWallpaperApplied;
 
     private final ServiceConnection mConnection = new ServiceConnection() {
         @Override
@@ -82,6 +90,7 @@ public final class TermuxBackdrop implements TextureView.SurfaceTextureListener 
         boolean enabled = false;
         String shader = TermuxConstants.TERMUX_HOME_DIR_PATH + "/shaders/termux/backdrop.glsl";
         float dim = 0.35f, quality = 0.5f;
+        boolean wallpaper = false;
         if (config.isFile()) {
             Properties props = new Properties();
             try (InputStream in = new FileInputStream(config)) {
@@ -90,6 +99,7 @@ public final class TermuxBackdrop implements TextureView.SurfaceTextureListener 
                 shader = props.getProperty("shader", shader).trim().replaceFirst("^~", TermuxConstants.TERMUX_HOME_DIR_PATH);
                 dim = clamp(Float.parseFloat(props.getProperty("dim", "0.35").trim()), 0f, 1f);
                 quality = clamp(Float.parseFloat(props.getProperty("quality", "0.5").trim()), 0.1f, 1f);
+                wallpaper = "wallpaper".equals(props.getProperty("mode", "shader").trim());
             } catch (Exception e) {
                 Logger.logStackTraceWithMessage(LOG_TAG, "Error reading " + config, e);
                 enabled = false;
@@ -101,8 +111,10 @@ public final class TermuxBackdrop implements TextureView.SurfaceTextureListener 
         mShaderPath = shader;
         mDim = dim;
         mQuality = quality;
+        mWallpaper = enabled && wallpaper;
+        applyWallpaperWindow();
 
-        if (mEnabled) {
+        if (mEnabled && !mWallpaper) {
             ensureView();
             mTextureView.setAlpha(mDim);
             if (mStarted) {
@@ -118,7 +130,7 @@ public final class TermuxBackdrop implements TextureView.SurfaceTextureListener 
 
     public void onStart() {
         mStarted = true;
-        if (mEnabled) {
+        if (mEnabled && !mWallpaper) {
             ensureView();
             bind();
             sendAttach();
@@ -129,6 +141,35 @@ public final class TermuxBackdrop implements TextureView.SurfaceTextureListener 
         mStarted = false;
         sendDetach();
         unbind();
+    }
+
+    /** Wallpaper mode: let the live wallpaper show behind the (translucent) window, or undo that. */
+    private void applyWallpaperWindow() {
+        if (mWallpaper == mWallpaperApplied) {
+            refreshBackground();
+            return;
+        }
+        if (mWallpaper) {
+            mActivity.getWindow().setFormat(PixelFormat.TRANSLUCENT);
+            mActivity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER);
+        } else {
+            mActivity.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER);
+            mActivity.getWindow().setFormat(PixelFormat.OPAQUE);
+        }
+        mWallpaperApplied = mWallpaper;
+        refreshBackground();
+    }
+
+    private void refreshBackground() {
+        if (mActivity.getTermuxTerminalSessionClient() != null)
+            mActivity.getTermuxTerminalSessionClient().updateBackgroundColor();
+    }
+
+    /** The terminal background colour to paint on the window: in wallpaper mode with alpha (1 - dim). */
+    public int windowBackground(int color) {
+        if (!mWallpaper) return color;
+        int a = Math.round(255f * (1f - mDim));
+        return Color.argb(a, Color.red(color), Color.green(color), Color.blue(color));
     }
 
     private void ensureView() {

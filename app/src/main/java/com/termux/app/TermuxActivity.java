@@ -329,6 +329,7 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         TermuxCrashUtils.notifyAppCrashFromCrashLogFile(this, LOG_TAG);
 
         mIsOnResumeAfterOnCreate = false;
+        applyExcludeFromRecents();
     }
 
     @Override
@@ -458,6 +459,20 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
         if (mTermuxTerminalViewClient != null)
             mTermuxTerminalViewClient.onReloadProperties();
+
+        applyExcludeFromRecents();
+    }
+
+    /** `exclude-from-recents=true` in termux.properties keeps Termux out of Recents (like JamesDSP). */
+    private void applyExcludeFromRecents() {
+        try {
+            boolean exclude = mProperties != null && mProperties.shouldExcludeFromRecents();
+            android.app.ActivityManager am = getSystemService(android.app.ActivityManager.class);
+            if (am == null) return;
+            for (android.app.ActivityManager.AppTask t : am.getAppTasks()) t.setExcludeFromRecents(exclude);
+        } catch (Exception e) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "applyExcludeFromRecents failed", e);
+        }
     }
 
 

@@ -106,3 +106,11 @@ feedback, JDSP audio uniforms, FPS_CAP etc. come for free — no second renderer
   background colour) is painted with alpha (1 - dim), so `dim` still means "how much backdrop shows through".
 - Trade-off told to the user: the wallpaper (e.g. ringbox 30 fps) keeps rendering while Termux is in front ->
   more heat/battery than the cheap chirp shader; mode is a one-line switch back.
+
+## 2026-11-11 20:25 — Cursor reported to the IME; Termux's own neko retired
+- User: unite the Termux neko with the status-bar one (shaderfx scope.md 2026-11-11). TerminalView now answers
+  requestCursorUpdates and sends CursorAnchorInfo (cursor cell box, view -> screen matrix) on every screen update
+  when it moved, like a normal text field. SpectreBoard forwards it; the status-bar neko hops down to the prompt.
+- `~/.termux/pets/pets.properties`: `cursor=neko` commented out (backup pets.properties.bak-20261111). Caza +
+  MicroBot (rows=) stay. TerminalPets code untouched: re-enable by un-commenting.
+- Live-tested 20:20: she sits by the prompt, follows typing and Enter, hops home when the keyboard closes.

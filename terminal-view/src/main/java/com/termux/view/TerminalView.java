@@ -69,6 +69,36 @@ public final class TerminalView extends View {
     /** The top row of text to display. Ranges from -activeTranscriptRows to 0. */
     int mTopRow;
 
+    /** Fork addition (shaderfx scope.md 2026-11-11): the IME asked to be told where the cursor is. */
+    private boolean mCursorAnchorMonitor;
+    private float[] mLastAnchor;
+
+    /** Send the terminal cursor's on-screen box to the IME (CursorAnchorInfo), only when it moved. */
+    void reportCursorAnchor() {
+        if (!mCursorAnchorMonitor || mEmulator == null || mRenderer == null) return;
+        int viewRow = mEmulator.getCursorRow() - mTopRow;
+        if (viewRow < 0 || viewRow >= mEmulator.mRows) return;
+        float x = mEmulator.getCursorCol() * mRenderer.mFontWidth;
+        float top = viewRow * mRenderer.mFontLineSpacing;           // row r spans r*spacing .. (r+1)*spacing
+        float bottom = top + mRenderer.mFontLineSpacing;
+        int[] loc = new int[2];
+        getLocationOnScreen(loc);
+        float[] a = {x, top, bottom, loc[0], loc[1]};
+        if (java.util.Arrays.equals(a, mLastAnchor)) return;
+        mLastAnchor = a;
+        android.graphics.Matrix m = new android.graphics.Matrix();
+        m.setTranslate(loc[0], loc[1]);
+        android.view.inputmethod.CursorAnchorInfo info = new android.view.inputmethod.CursorAnchorInfo.Builder()
+            .setMatrix(m)
+            .setSelectionRange(0, 0)
+            .setInsertionMarkerLocation(x, top, bottom - mRenderer.mFontLineSpacing * 0.2f, bottom,
+                android.view.inputmethod.CursorAnchorInfo.FLAG_HAS_VISIBLE_REGION)
+            .build();
+        android.view.inputmethod.InputMethodManager imm =
+            (android.view.inputmethod.InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null) imm.updateCursorAnchorInfo(this, info);
+    }
+
     /** Fork addition: ANeko pets drawn in this view's overlay, see {@link TerminalPets}. */
     private TerminalPets mPets;
     int[] mDefaultSelectors = new int[]{-1,-1,-1,-1};
@@ -345,6 +375,18 @@ public final class TerminalView extends View {
 
         return new BaseInputConnection(this, true) {
 
+            // Fork addition (shaderfx scope.md 2026-11-11): report the terminal cursor to the IME like any text
+            // field does, so SpectreBoard can call the status-bar neko down to it.
+            @Override
+            public boolean requestCursorUpdates(int cursorUpdateMode) {
+                mCursorAnchorMonitor = (cursorUpdateMode & InputConnection.CURSOR_UPDATE_MONITOR) != 0;
+                if ((cursorUpdateMode & InputConnection.CURSOR_UPDATE_IMMEDIATE) != 0) {
+                    mLastAnchor = null;
+                    reportCursorAnchor();
+                }
+                return true;
+            }
+
             @Override
             public boolean finishComposingText() {
                 if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) mClient.logInfo(LOG_TAG, "IME: finishComposingText()");
@@ -462,6 +504,7 @@ public final class TerminalView extends View {
     public void onScreenUpdated(boolean skipScrolling) {
         if (mEmulator == null) return;
         if (mPets != null) mPets.onScreenUpdated();
+        reportCursorAnchor();
 
         int rowsInHistory = mEmulator.getScreen().getActiveTranscriptRows();
         if (mTopRow < -rowsInHistory) setTopRow(-rowsInHistory);
